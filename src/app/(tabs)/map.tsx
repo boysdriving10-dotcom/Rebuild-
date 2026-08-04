@@ -1,24 +1,110 @@
+import * as Location from 'expo-location';
 import { router } from 'expo-router';
-import { useMemo, useRef, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import MapView, { Marker, PROVIDER_DEFAULT, type Region } from 'react-native-maps';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { CourtDetailContent } from '@/components/CourtDetailContent';
 import { BottomSheet } from '@/components/ui/BottomSheet';
 import { Colors, FontSize, Radius, Spacing } from '@/constants/theme';
-import { DEFAULT_REGION, getGamesForCourt, searchCourts } from '@/data/mock';
+import { DEFAULT_REGION, getGamesForCourt } from '@/data/mock';
+import { filterCourtsByQuery } from '@/data/overpassCourts';
+import { useMapCourts } from '@/hooks/useMapCourts';
 import type { Court } from '@/types';
+
+type LocationStatus = 'pending' | 'granted' | 'denied';
 
 export default function MapScreen() {
   const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView>(null);
   const [query, setQuery] = useState('');
   const [selectedCourt, setSelectedCourt] = useState<Court | null>(null);
-  const [region] = useState<Region>(DEFAULT_REGION);
+  const [locationStatus, setLocationStatus] = useState<LocationStatus>('pending');
+  const [userCoord, setUserCoord] = useState<{ latitude: number; longitude: number } | null>(
+    null
+  );
+  const [mapReady, setMapReady] = useState(false);
+  const didCenterOnUser = useRef(false);
 
-  const courts = useMemo(() => searchCourts(query), [query]);
+  const {
+    courts,
+    loading,
+    error,
+    zoomedOut,
+    retry,
+    onRegionChangeComplete,
+  } = useMapCourts(DEFAULT_REGION);
+
+  const visibleCourts = useMemo(() => filterCourtsByQuery(courts, query), [courts, query]);
   const activeGameCount = selectedCourt ? getGamesForCourt(selectedCourt.id).length : 0;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (cancelled) return;
+
+        if (status !== 'granted') {
+          setLocationStatus('denied');
+          return;
+        }
+
+        setLocationStatus('granted');
+        const position = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+        if (cancelled) return;
+
+        const coord = {
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+        };
+        setUserCoord(coord);
+      } catch {
+        if (!cancelled) setLocationStatus('denied');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!mapReady || !userCoord || didCenterOnUser.current) return;
+    didCenterOnUser.current = true;
+    const region: Region = {
+      latitude: userCoord.latitude,
+      longitude: userCoord.longitude,
+      latitudeDelta: 0.04,
+      longitudeDelta: 0.04,
+    };
+    mapRef.current?.animateToRegion(region, 450);
+    onRegionChangeComplete(region);
+  }, [mapReady, userCoord, onRegionChangeComplete]);
+
+  const recenter = useCallback(() => {
+    if (!userCoord) return;
+    const region: Region = {
+      latitude: userCoord.latitude,
+      longitude: userCoord.longitude,
+      latitudeDelta: 0.04,
+      longitudeDelta: 0.04,
+    };
+    mapRef.current?.animateToRegion(region, 400);
+    onRegionChangeComplete(region);
+  }, [userCoord, onRegionChangeComplete]);
 
   const focusCourt = (court: Court) => {
     setSelectedCourt(court);
@@ -52,12 +138,18 @@ export default function MapScreen() {
         ref={mapRef}
         style={StyleSheet.absoluteFill}
         provider={PROVIDER_DEFAULT}
-        initialRegion={region}
-        showsUserLocation
+        initialRegion={DEFAULT_REGION}
+        showsUserLocation={locationStatus === 'granted'}
         showsMyLocationButton={false}
         showsCompass={false}
-        userInterfaceStyle="dark">
-        {courts.map((court) => {
+        scrollEnabled
+        zoomEnabled
+        rotateEnabled
+        pitchEnabled
+        userInterfaceStyle="dark"
+        onMapReady={() => setMapReady(true)}
+        onRegionChangeComplete={(region) => onRegionChangeComplete(region)}>
+        {visibleCourts.map((court) => {
           const count = getGamesForCourt(court.id).length;
           return (
             <Marker
@@ -73,6 +165,7 @@ export default function MapScreen() {
                   : 'No active games'
               }
               pinColor={count > 0 ? Colors.accent : Colors.textMuted}
+              tracksViewChanges={false}
               onPress={() => setSelectedCourt(court)}
             />
           );
@@ -90,9 +183,9 @@ export default function MapScreen() {
           returnKeyType="search"
           clearButtonMode="while-editing"
         />
-        {query.length > 0 && courts.length > 0 ? (
+        {query.length > 0 && visibleCourts.length > 0 ? (
           <View style={styles.results}>
-            {courts.slice(0, 5).map((court) => (
+            {visibleCourts.slice(0, 5).map((court) => (
               <Pressable
                 key={court.id}
                 style={styles.resultRow}
@@ -101,16 +194,52 @@ export default function MapScreen() {
                   focusCourt(court);
                 }}>
                 <Text style={styles.resultName}>{court.name}</Text>
-                <Text style={styles.resultMeta}>
-                  {getGamesForCourt(court.id).length > 0
-                    ? `${getGamesForCourt(court.id).length} games`
-                    : 'No games'}
-                </Text>
+                <Text style={styles.resultMeta}>{court.address}</Text>
               </Pressable>
             ))}
           </View>
         ) : null}
       </View>
+
+      {locationStatus === 'denied' ? (
+        <View style={[styles.banner, { top: insets.top + 64 }]}>
+          <Text style={styles.bannerText}>
+            Location is off. You can still browse the map — enable location to jump to courts near
+            you.
+          </Text>
+        </View>
+      ) : null}
+
+      {zoomedOut ? (
+        <View style={styles.hintBar}>
+          <Text style={styles.hintText}>Zoom in to load basketball courts</Text>
+        </View>
+      ) : null}
+
+      {loading ? (
+        <View style={styles.loadingPill} pointerEvents="none">
+          <ActivityIndicator color={Colors.accent} size="small" />
+          <Text style={styles.loadingText}>Finding courts…</Text>
+        </View>
+      ) : null}
+
+      {error && !loading ? (
+        <View style={styles.errorBar}>
+          <Text style={styles.errorText}>{error}</Text>
+          <Pressable onPress={retry} style={styles.retryBtn}>
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {locationStatus === 'granted' && userCoord ? (
+        <Pressable
+          accessibilityLabel="Recenter on my location"
+          onPress={recenter}
+          style={[styles.recenter, { bottom: Math.max(insets.bottom, Spacing.lg) + Spacing.lg }]}>
+          <Text style={styles.recenterIcon}>◎</Text>
+        </Pressable>
+      ) : null}
 
       <BottomSheet visible={selectedCourt !== null} onClose={() => setSelectedCourt(null)}>
         {selectedCourt ? (
@@ -177,5 +306,116 @@ const styles = StyleSheet.create({
   resultMeta: {
     color: Colors.textSecondary,
     fontSize: FontSize.xs,
+  },
+  banner: {
+    backgroundColor: Colors.surfaceElevated,
+    borderColor: Colors.border,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    left: Spacing.lg,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    position: 'absolute',
+    right: Spacing.lg,
+    zIndex: 9,
+  },
+  bannerText: {
+    color: Colors.textSecondary,
+    fontSize: FontSize.sm,
+    fontWeight: '500',
+    lineHeight: 18,
+  },
+  hintBar: {
+    alignSelf: 'center',
+    backgroundColor: Colors.surfaceElevated,
+    borderColor: Colors.border,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+    bottom: 120,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.sm,
+    position: 'absolute',
+    zIndex: 8,
+  },
+  hintText: {
+    color: Colors.textSecondary,
+    fontSize: FontSize.sm,
+    fontWeight: '600',
+  },
+  loadingPill: {
+    alignItems: 'center',
+    alignSelf: 'center',
+    backgroundColor: Colors.surfaceElevated,
+    borderColor: Colors.border,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+    bottom: 120,
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.sm,
+    position: 'absolute',
+    zIndex: 8,
+  },
+  loadingText: {
+    color: Colors.text,
+    fontSize: FontSize.sm,
+    fontWeight: '600',
+  },
+  errorBar: {
+    alignItems: 'center',
+    alignSelf: 'center',
+    backgroundColor: Colors.surfaceElevated,
+    borderColor: Colors.border,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    bottom: 120,
+    flexDirection: 'row',
+    gap: Spacing.md,
+    maxWidth: '90%',
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+    position: 'absolute',
+    zIndex: 8,
+  },
+  errorText: {
+    color: Colors.textSecondary,
+    flexShrink: 1,
+    fontSize: FontSize.sm,
+    fontWeight: '500',
+  },
+  retryBtn: {
+    backgroundColor: Colors.accent,
+    borderRadius: Radius.sm,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+  },
+  retryText: {
+    color: Colors.white,
+    fontSize: FontSize.sm,
+    fontWeight: '700',
+  },
+  recenter: {
+    alignItems: 'center',
+    backgroundColor: Colors.surfaceElevated,
+    borderColor: Colors.border,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    height: 48,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: Spacing.lg,
+    shadowColor: Colors.black,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    elevation: 4,
+    width: 48,
+    zIndex: 10,
+  },
+  recenterIcon: {
+    color: Colors.accent,
+    fontSize: 22,
+    fontWeight: '700',
   },
 });

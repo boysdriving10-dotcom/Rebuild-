@@ -38,6 +38,12 @@
       "expo-router",
       "expo-dev-client",
       [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "BallOut uses your location to show nearby basketball courts and pickup games."
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "backgroundColor": "#000000",
