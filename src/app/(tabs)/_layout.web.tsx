@@ -28,7 +28,7 @@ export default function TabsLayoutWeb() {
       <Tabs.Screen
         name="map"
         options={{
-          title: 'Map',
+          title: 'Courts',
           tabBarIcon: ({ color }) => <TabIcon label="◉" color={color} />,
         }}
       />

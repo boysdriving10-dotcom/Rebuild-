@@ -6,11 +6,15 @@ import type { Game } from '@/types';
 
 type GameCardProps = {
   game: Game;
+  joined: boolean;
   onJoin: (game: Game) => void;
+  onLeave: (game: Game) => void;
+  onDirections: (game: Game) => void;
 };
 
-export function GameCard({ game, onJoin }: GameCardProps) {
+export function GameCard({ game, joined, onJoin, onLeave, onDirections }: GameCardProps) {
   const spotsLeft = game.maxPlayers - game.currentPlayers;
+  const full = spotsLeft <= 0;
 
   return (
     <View style={styles.card}>
@@ -19,7 +23,7 @@ export function GameCard({ game, onJoin }: GameCardProps) {
           <Text style={styles.courtName} numberOfLines={1}>
             {game.courtName}
           </Text>
-          <Text style={styles.distance}>{game.distance}</Text>
+          <Text style={styles.distance}>{game.distance || 'Nearby'}</Text>
         </View>
         <View style={styles.badge}>
           <Text style={styles.badgeText}>{game.date}</Text>
@@ -31,11 +35,22 @@ export function GameCard({ game, onJoin }: GameCardProps) {
         <MetaChip
           label="Players"
           value={`${game.currentPlayers}/${game.maxPlayers}`}
-          highlight={spotsLeft <= 2}
+          highlight={spotsLeft <= 2 && !full}
         />
       </View>
 
-      <Button title="Join Game" onPress={() => onJoin(game)} />
+      {joined ? (
+        <View style={styles.actions}>
+          <Button title="Leave Game" variant="secondary" onPress={() => onLeave(game)} />
+          <Button title="Get Directions" variant="outline" onPress={() => onDirections(game)} />
+        </View>
+      ) : (
+        <Button
+          title={full ? 'Game Full' : 'Join Game'}
+          disabled={full}
+          onPress={() => onJoin(game)}
+        />
+      )}
     </View>
   );
 }
@@ -122,5 +137,8 @@ const styles = StyleSheet.create({
   },
   chipValueHot: {
     color: Colors.accent,
+  },
+  actions: {
+    gap: Spacing.sm,
   },
 });

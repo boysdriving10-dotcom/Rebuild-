@@ -1,21 +1,42 @@
-import { useState } from 'react';
 import { Alert, FlatList, StyleSheet, Text, View } from 'react-native';
 
 import { GameCard } from '@/components/ui/GameCard';
 import { Screen } from '@/components/ui/Screen';
 import { BottomTabInset, Colors, FontSize, Spacing } from '@/constants/theme';
-import { MOCK_GAMES } from '@/data/mock';
+import { useAuth } from '@/context/AuthContext';
+import { useGames } from '@/context/GamesContext';
 import type { Game } from '@/types';
+import { openCourtDirections } from '@/utils/openDirections';
 
 export default function HomeScreen() {
-  const [games] = useState(MOCK_GAMES);
+  const { user } = useAuth();
+  const { games, joinGame, leaveGame, isJoined } = useGames();
 
   const handleJoin = (game: Game) => {
-    Alert.alert(
-      'Joined Game',
-      `You're in for ${game.courtName} at ${game.time}. (Mock — backend coming soon.)`,
-      [{ text: 'OK' }]
-    );
+    if (!user) return;
+    const result = joinGame(game.id, user.id);
+    if (!result.ok) {
+      Alert.alert('Couldn’t join', result.error);
+      return;
+    }
+    Alert.alert('Joined Game', `You're in for ${game.courtName} at ${game.time}.`);
+  };
+
+  const handleLeave = (game: Game) => {
+    if (!user) return;
+    const result = leaveGame(game.id, user.id);
+    if (!result.ok) {
+      Alert.alert('Couldn’t leave', result.error);
+    }
+  };
+
+  const handleDirections = (game: Game) => {
+    void openCourtDirections({
+      latitude: game.courtLatitude,
+      longitude: game.courtLongitude,
+      name: game.courtName,
+      address: game.courtAddress,
+    });
   };
 
   return (
@@ -31,11 +52,19 @@ export default function HomeScreen() {
         contentContainerStyle={styles.list}
         showsVerticalScrollIndicator={false}
         ItemSeparatorComponent={() => <View style={styles.separator} />}
-        renderItem={({ item }) => <GameCard game={item} onJoin={handleJoin} />}
+        renderItem={({ item }) => (
+          <GameCard
+            game={item}
+            joined={user ? isJoined(item.id, user.id) : false}
+            onJoin={handleJoin}
+            onLeave={handleLeave}
+            onDirections={handleDirections}
+          />
+        )}
         ListEmptyComponent={
           <View style={styles.empty}>
             <Text style={styles.emptyTitle}>No games nearby</Text>
-            <Text style={styles.emptyBody}>Check the Map or create a game.</Text>
+            <Text style={styles.emptyBody}>Check Courts or create a game.</Text>
           </View>
         }
       />

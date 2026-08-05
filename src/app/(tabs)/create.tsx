@@ -1,4 +1,4 @@
-import { useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   Alert,
@@ -16,33 +16,87 @@ import { Screen } from '@/components/ui/Screen';
 import { SegmentedControl } from '@/components/ui/SegmentedControl';
 import { Stepper } from '@/components/ui/Stepper';
 import { BottomTabInset, Colors, FontSize, Radius, Spacing } from '@/constants/theme';
+import { useAuth } from '@/context/AuthContext';
+import { useGames } from '@/context/GamesContext';
 import { MOCK_COURTS } from '@/data/mock';
+import type { Court } from '@/types';
 
 const DATE_OPTIONS = ['Today', 'Tomorrow', 'This Weekend'] as const;
 const TIME_OPTIONS = ['4:00 PM', '5:00 PM', '6:00 PM', '7:00 PM', '8:00 PM', '9:00 PM'] as const;
 
 export default function CreateGameScreen() {
-  const params = useLocalSearchParams<{ courtId?: string }>();
-  const [courtId, setCourtId] = useState(MOCK_COURTS[0]?.id ?? '');
+  const params = useLocalSearchParams<{
+    courtId?: string;
+    courtName?: string;
+    latitude?: string;
+    longitude?: string;
+    address?: string;
+  }>();
+  const { user } = useAuth();
+  const { createGame } = useGames();
+
+  const paramCourt: Court | null = useMemo(() => {
+    if (!params.courtId || !params.courtName) return null;
+    const lat = Number(params.latitude);
+    const lng = Number(params.longitude);
+    return {
+      id: params.courtId,
+      name: params.courtName,
+      latitude: Number.isFinite(lat) ? lat : 0,
+      longitude: Number.isFinite(lng) ? lng : 0,
+      address: params.address || 'Address unavailable',
+      activeGameIds: [],
+    };
+  }, [params.courtId, params.courtName, params.latitude, params.longitude, params.address]);
+
+  const courtOptions = useMemo(() => {
+    if (!paramCourt) return MOCK_COURTS;
+    if (MOCK_COURTS.some((c) => c.id === paramCourt.id)) return MOCK_COURTS;
+    return [paramCourt, ...MOCK_COURTS];
+  }, [paramCourt]);
+
+  const [courtId, setCourtId] = useState(paramCourt?.id ?? MOCK_COURTS[0]?.id ?? '');
   const [date, setDate] = useState<(typeof DATE_OPTIONS)[number]>('Today');
   const [time, setTime] = useState<(typeof TIME_OPTIONS)[number]>('6:00 PM');
   const [maxPlayers, setMaxPlayers] = useState(10);
   const [visibility, setVisibility] = useState<'public' | 'private'>('public');
 
   useEffect(() => {
-    if (!params.courtId) return;
-    const exists = MOCK_COURTS.some((c) => c.id === params.courtId);
-    if (exists) setCourtId(params.courtId);
-  }, [params.courtId]);
+    if (paramCourt) setCourtId(paramCourt.id);
+  }, [paramCourt]);
 
   const selectedCourt = useMemo(
-    () => MOCK_COURTS.find((c) => c.id === courtId),
-    [courtId]
+    () => courtOptions.find((c) => c.id === courtId),
+    [courtId, courtOptions]
   );
 
   const onCreate = () => {
+    if (!user) {
+      Alert.alert('Not logged in', 'Log in to create a game.');
+      return;
+    }
     if (!selectedCourt) {
       Alert.alert('Pick a court', 'Choose a court for your game.');
+      return;
+    }
+
+    const result = createGame(
+      {
+        courtId: selectedCourt.id,
+        courtName: selectedCourt.name,
+        courtLatitude: selectedCourt.latitude,
+        courtLongitude: selectedCourt.longitude,
+        courtAddress: selectedCourt.address,
+        date,
+        time,
+        maxPlayers,
+        isPublic: visibility === 'public',
+      },
+      { id: user.id, username: user.username }
+    );
+
+    if (!result.ok) {
+      Alert.alert('Couldn’t create game', result.error);
       return;
     }
 
@@ -50,8 +104,13 @@ export default function CreateGameScreen() {
       'Game Created',
       `${selectedCourt.name}\n${date} · ${time}\n${maxPlayers} max · ${
         visibility === 'public' ? 'Public' : 'Private'
-      }\n\n(Mock — backend coming soon.)`,
-      [{ text: 'Nice' }]
+      }`,
+      [
+        {
+          text: 'Nice',
+          onPress: () => router.replace('/(tabs)'),
+        },
+      ]
     );
   };
 
@@ -71,7 +130,7 @@ export default function CreateGameScreen() {
 
           <Field label="Court">
             <View style={styles.optionList}>
-              {MOCK_COURTS.map((court) => {
+              {courtOptions.map((court) => {
                 const selected = court.id === courtId;
                 return (
                   <Pressable

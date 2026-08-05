@@ -1,37 +1,51 @@
-import { Linking, Platform, StyleSheet, Text, View } from 'react-native';
+import { Alert, StyleSheet, Text, View } from 'react-native';
 
 import { Button } from '@/components/ui/Button';
 import { Colors, FontSize, Spacing } from '@/constants/theme';
-import type { Court } from '@/types';
+import type { Court, Game } from '@/types';
+import { openCourtDirections } from '@/utils/openDirections';
 
 type CourtDetailSheetProps = {
   court: Court;
-  activeGameCount: number;
-  onJoinGame: () => void;
+  games: Game[];
+  currentUserId?: string;
+  onJoinGame: (game: Game) => void;
   onStartGame: () => void;
   onStartAnother: () => void;
 };
 
 export function CourtDetailContent({
   court,
-  activeGameCount,
+  games,
+  currentUserId,
   onJoinGame,
   onStartGame,
   onStartAnother,
 }: CourtDetailSheetProps) {
+  const activeGameCount = games.length;
   const hasGames = activeGameCount > 0;
 
-  const openDirections = async () => {
-    const label = encodeURIComponent(court.name);
-    const { latitude, longitude } = court;
-    const url = Platform.select({
-      ios: `maps:0,0?q=${label}@${latitude},${longitude}`,
-      android: `geo:0,0?q=${latitude},${longitude}(${label})`,
-      default: `https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}`,
+  const joinable = games.find(
+    (g) =>
+      g.currentPlayers < g.maxPlayers &&
+      (!currentUserId || !g.playerIds.includes(currentUserId))
+  );
+
+  const openDirections = () => {
+    void openCourtDirections({
+      latitude: court.latitude,
+      longitude: court.longitude,
+      name: court.name,
+      address: court.address,
     });
-    if (url) {
-      await Linking.openURL(url);
+  };
+
+  const handleJoin = () => {
+    if (!joinable) {
+      Alert.alert('No open games', 'Every game here is full or you already joined.');
+      return;
     }
+    onJoinGame(joinable);
   };
 
   return (
@@ -55,7 +69,7 @@ export function CourtDetailContent({
       <View style={styles.actions}>
         {hasGames ? (
           <>
-            <Button title="Join Game" onPress={onJoinGame} />
+            <Button title="Join Game" onPress={handleJoin} />
             <Button title="Start Another Game" variant="secondary" onPress={onStartAnother} />
           </>
         ) : (

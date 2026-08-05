@@ -12,8 +12,9 @@ export const MOCK_USER: User = {
   id: 'user-1',
   username: 'hooper22',
   email: 'hooper@ballout.app',
-  gamesHosted: 12,
-  gamesJoined: 47,
+  bio: 'Ready to ball.',
+  gamesHosted: 0,
+  gamesJoined: 0,
   avatarInitials: 'H2',
 };
 
@@ -84,85 +85,7 @@ export const MOCK_COURTS: Court[] = [
   },
 ];
 
-export const MOCK_GAMES: Game[] = [
-  {
-    id: 'game-1',
-    courtId: 'court-1',
-    courtName: 'Rucker Park',
-    distance: '2.1 mi',
-    time: '6:00 PM',
-    date: 'Today',
-    currentPlayers: 8,
-    maxPlayers: 10,
-    isPublic: true,
-  },
-  {
-    id: 'game-2',
-    courtId: 'court-1',
-    courtName: 'Rucker Park',
-    distance: '2.1 mi',
-    time: '8:00 PM',
-    date: 'Today',
-    currentPlayers: 4,
-    maxPlayers: 10,
-    isPublic: true,
-  },
-  {
-    id: 'game-3',
-    courtId: 'court-2',
-    courtName: 'West 4th Street Courts',
-    distance: '4.3 mi',
-    time: '7:30 PM',
-    date: 'Today',
-    currentPlayers: 6,
-    maxPlayers: 8,
-    isPublic: true,
-  },
-  {
-    id: 'game-4',
-    courtId: 'court-4',
-    courtName: 'Brooklyn Bridge Park Courts',
-    distance: '1.8 mi',
-    time: '5:00 PM',
-    date: 'Today',
-    currentPlayers: 9,
-    maxPlayers: 10,
-    isPublic: true,
-  },
-  {
-    id: 'game-5',
-    courtId: 'court-6',
-    courtName: 'Dean Street Playground',
-    distance: '0.6 mi',
-    time: '6:30 PM',
-    date: 'Today',
-    currentPlayers: 3,
-    maxPlayers: 10,
-    isPublic: true,
-  },
-  {
-    id: 'game-6',
-    courtId: 'court-8',
-    courtName: 'Prospect Park Ballfields',
-    distance: '1.2 mi',
-    time: '4:00 PM',
-    date: 'Tomorrow',
-    currentPlayers: 5,
-    maxPlayers: 10,
-    isPublic: true,
-  },
-  {
-    id: 'game-7',
-    courtId: 'court-8',
-    courtName: 'Prospect Park Ballfields',
-    distance: '1.2 mi',
-    time: '7:00 PM',
-    date: 'Tomorrow',
-    currentPlayers: 2,
-    maxPlayers: 8,
-    isPublic: false,
-  },
-];
+export const MOCK_GAMES: Game[] = [];
 
 export function getGamesForCourt(courtId: string): Game[] {
   return MOCK_GAMES.filter((game) => game.courtId === courtId);

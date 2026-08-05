@@ -5,13 +5,18 @@ import { Button } from '@/components/ui/Button';
 import { Screen } from '@/components/ui/Screen';
 import { Colors, FontSize, Radius, Spacing } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
+import { useGames } from '@/context/GamesContext';
 
 export default function ProfileScreen() {
   const { user, logout } = useAuth();
+  const { countHosted, countJoined } = useGames();
 
   if (!user) {
     return null;
   }
+
+  const hosted = countHosted(user.id);
+  const joined = countJoined(user.id);
 
   return (
     <Screen edges={['top', 'bottom']}>
@@ -19,12 +24,13 @@ export default function ProfileScreen() {
         <View style={styles.identity}>
           <Avatar initials={user.avatarInitials} size={104} />
           <Text style={styles.username}>@{user.username}</Text>
+          <Text style={styles.bio}>{user.bio || 'Ready to ball.'}</Text>
         </View>
 
         <View style={styles.stats}>
-          <Stat label="Games Hosted" value={user.gamesHosted} />
+          <Stat label="Games Hosted" value={hosted} />
           <View style={styles.statDivider} />
-          <Stat label="Games Joined" value={user.gamesJoined} />
+          <Stat label="Games Joined" value={joined} />
         </View>
 
         <Button title="Log Out" variant="outline" onPress={logout} style={styles.logout} />
@@ -59,6 +65,12 @@ const styles = StyleSheet.create({
     color: Colors.text,
     fontSize: FontSize['2xl'],
     fontWeight: '800',
+  },
+  bio: {
+    color: Colors.textSecondary,
+    fontSize: FontSize.md,
+    fontWeight: '500',
+    textAlign: 'center',
   },
   stats: {
     backgroundColor: Colors.surfaceElevated,

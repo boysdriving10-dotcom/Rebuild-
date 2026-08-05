@@ -16,16 +16,20 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CourtDetailContent } from '@/components/CourtDetailContent';
 import { BottomSheet } from '@/components/ui/BottomSheet';
 import { Colors, FontSize, Radius, Spacing } from '@/constants/theme';
-import { DEFAULT_REGION, getGamesForCourt } from '@/data/mock';
+import { useAuth } from '@/context/AuthContext';
+import { useGames } from '@/context/GamesContext';
+import { DEFAULT_REGION } from '@/data/mock';
 import { filterCourtsByQuery } from '@/data/overpassCourts';
 import { useMapCourts } from '@/hooks/useMapCourts';
-import type { Court } from '@/types';
+import type { Court, Game } from '@/types';
 
 type LocationStatus = 'pending' | 'granted' | 'denied';
 
 export default function MapScreen() {
   const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView>(null);
+  const { user } = useAuth();
+  const { getGamesForCourt, joinGame } = useGames();
   const [query, setQuery] = useState('');
   const [selectedCourt, setSelectedCourt] = useState<Court | null>(null);
   const [locationStatus, setLocationStatus] = useState<LocationStatus>('pending');
@@ -45,7 +49,7 @@ export default function MapScreen() {
   } = useMapCourts(DEFAULT_REGION);
 
   const visibleCourts = useMemo(() => filterCourtsByQuery(courts, query), [courts, query]);
-  const activeGameCount = selectedCourt ? getGamesForCourt(selectedCourt.id).length : 0;
+  const courtGames = selectedCourt ? getGamesForCourt(selectedCourt.id) : [];
 
   useEffect(() => {
     let cancelled = false;
@@ -119,17 +123,33 @@ export default function MapScreen() {
     );
   };
 
-  const goCreate = (courtId?: string) => {
+  const goCreate = (court?: Court) => {
     setSelectedCourt(null);
+    if (!court) {
+      router.push('/(tabs)/create');
+      return;
+    }
     router.push({
       pathname: '/(tabs)/create',
-      params: courtId ? { courtId } : undefined,
+      params: {
+        courtId: court.id,
+        courtName: court.name,
+        latitude: String(court.latitude),
+        longitude: String(court.longitude),
+        address: court.address,
+      },
     });
   };
 
-  const joinGame = () => {
+  const handleJoinGame = (game: Game) => {
+    if (!user) return;
+    const result = joinGame(game.id, user.id);
+    if (!result.ok) {
+      Alert.alert('Couldn’t join', result.error);
+      return;
+    }
     setSelectedCourt(null);
-    Alert.alert('Join Game', 'Opening game details (mock). Head to Home to see all games.');
+    Alert.alert('Joined Game', `You're in for ${game.courtName} at ${game.time}.`);
   };
 
   return (
@@ -245,10 +265,11 @@ export default function MapScreen() {
         {selectedCourt ? (
           <CourtDetailContent
             court={selectedCourt}
-            activeGameCount={activeGameCount}
-            onJoinGame={joinGame}
-            onStartGame={() => goCreate(selectedCourt.id)}
-            onStartAnother={() => goCreate(selectedCourt.id)}
+            games={courtGames}
+            currentUserId={user?.id}
+            onJoinGame={handleJoinGame}
+            onStartGame={() => goCreate(selectedCourt)}
+            onStartAnother={() => goCreate(selectedCourt)}
           />
         ) : null}
       </BottomSheet>

@@ -7,6 +7,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { Colors } from '@/constants/theme';
 import { AuthProvider, useAuth } from '@/context/AuthContext';
+import { GamesProvider } from '@/context/GamesContext';
 
 import '@/global.css';
 
@@ -43,7 +44,9 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={styles.root}>
       <AuthProvider>
-        <RootNavigator />
+        <GamesProvider>
+          <RootNavigator />
+        </GamesProvider>
       </AuthProvider>
     </GestureHandlerRootView>
   );

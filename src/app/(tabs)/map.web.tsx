@@ -6,28 +6,53 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CourtDetailContent } from '@/components/CourtDetailContent';
 import { BottomSheet } from '@/components/ui/BottomSheet';
 import { Colors, FontSize, Radius, Spacing } from '@/constants/theme';
-import { getGamesForCourt, searchCourts } from '@/data/mock';
-import type { Court } from '@/types';
+import { useAuth } from '@/context/AuthContext';
+import { useGames } from '@/context/GamesContext';
+import { searchCourts } from '@/data/mock';
+import type { Court, Game } from '@/types';
 
 /** Web fallback — interactive maps ship on iOS/Android */
 export default function MapScreenWeb() {
   const insets = useSafeAreaInsets();
+  const { user } = useAuth();
+  const { getGamesForCourt, joinGame } = useGames();
   const [query, setQuery] = useState('');
   const [selectedCourt, setSelectedCourt] = useState<Court | null>(null);
   const courts = useMemo(() => searchCourts(query), [query]);
-  const activeGameCount = selectedCourt ? getGamesForCourt(selectedCourt.id).length : 0;
+  const courtGames = selectedCourt ? getGamesForCourt(selectedCourt.id) : [];
 
-  const goCreate = (courtId?: string) => {
+  const goCreate = (court?: Court) => {
     setSelectedCourt(null);
+    if (!court) {
+      router.push('/(tabs)/create');
+      return;
+    }
     router.push({
       pathname: '/(tabs)/create',
-      params: courtId ? { courtId } : undefined,
+      params: {
+        courtId: court.id,
+        courtName: court.name,
+        latitude: String(court.latitude),
+        longitude: String(court.longitude),
+        address: court.address,
+      },
     });
+  };
+
+  const handleJoinGame = (game: Game) => {
+    if (!user) return;
+    const result = joinGame(game.id, user.id);
+    if (!result.ok) {
+      Alert.alert('Couldn’t join', result.error);
+      return;
+    }
+    setSelectedCourt(null);
+    Alert.alert('Joined Game', `You're in for ${game.courtName} at ${game.time}.`);
   };
 
   return (
     <View style={[styles.root, { paddingTop: insets.top + Spacing.md }]}>
-      <Text style={styles.title}>Map</Text>
+      <Text style={styles.title}>Courts</Text>
       <Text style={styles.hint}>
         Open the iOS or Android app for the full interactive map experience.
       </Text>
@@ -59,13 +84,11 @@ export default function MapScreenWeb() {
         {selectedCourt ? (
           <CourtDetailContent
             court={selectedCourt}
-            activeGameCount={activeGameCount}
-            onJoinGame={() => {
-              setSelectedCourt(null);
-              Alert.alert('Join Game', 'Mock join — backend coming soon.');
-            }}
-            onStartGame={() => goCreate(selectedCourt.id)}
-            onStartAnother={() => goCreate(selectedCourt.id)}
+            games={courtGames}
+            currentUserId={user?.id}
+            onJoinGame={handleJoinGame}
+            onStartGame={() => goCreate(selectedCourt)}
+            onStartAnother={() => goCreate(selectedCourt)}
           />
         ) : null}
       </BottomSheet>

@@ -35,6 +35,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           ...MOCK_USER,
           email: email.trim(),
           username,
+          bio: 'Ready to ball.',
+          gamesHosted: 0,
+          gamesJoined: 0,
           avatarInitials: username.slice(0, 2).toUpperCase(),
         });
         return { ok: true };
@@ -53,6 +56,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           id: 'user-new',
           username: username.trim(),
           email: email.trim(),
+          bio: 'Ready to ball.',
           gamesHosted: 0,
           gamesJoined: 0,
           avatarInitials: username.trim().slice(0, 2).toUpperCase(),
