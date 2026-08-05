@@ -1,6 +1,7 @@
 import { Link, router } from 'expo-router';
 import { useState } from 'react';
 import {
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -13,8 +14,10 @@ import {
 import { Button } from '@/components/ui/Button';
 import { Screen } from '@/components/ui/Screen';
 import { TextField } from '@/components/ui/TextField';
-import { Colors, FontSize, Spacing } from '@/constants/theme';
+import { Colors, FontSize, Radius, Spacing } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
+
+const logo = require('../../../assets/images/ballout-logo.png');
 
 export default function CreateAccountScreen() {
   const { createAccount } = useAuth();
@@ -43,6 +46,12 @@ export default function CreateAccountScreen() {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}>
           <View style={styles.hero}>
+            <Image
+              source={logo}
+              style={styles.logo}
+              accessibilityLabel="BallOut"
+              resizeMode="contain"
+            />
             <Text style={styles.title}>Create Account</Text>
             <Text style={styles.subtitle}>Join BallOut and start balling out.</Text>
           </View>
@@ -126,6 +135,12 @@ const styles = StyleSheet.create({
   },
   hero: {
     gap: Spacing.sm,
+  },
+  logo: {
+    borderRadius: Radius.md,
+    height: 56,
+    marginBottom: Spacing.xs,
+    width: 56,
   },
   title: {
     color: Colors.text,

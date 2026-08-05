@@ -1,6 +1,7 @@
 import { Link } from 'expo-router';
 import { useState } from 'react';
 import {
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -13,8 +14,10 @@ import {
 import { Button } from '@/components/ui/Button';
 import { Screen } from '@/components/ui/Screen';
 import { TextField } from '@/components/ui/TextField';
-import { Colors, FontSize, Spacing } from '@/constants/theme';
+import { Colors, FontSize, Radius, Spacing } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
+
+const logo = require('../../../assets/images/ballout-logo.png');
 
 export default function LoginScreen() {
   const { login } = useAuth();
@@ -39,7 +42,12 @@ export default function LoginScreen() {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}>
           <View style={styles.hero}>
-            <Text style={styles.brand}>BallOut</Text>
+            <Image
+              source={logo}
+              style={styles.logo}
+              accessibilityLabel="BallOut"
+              resizeMode="contain"
+            />
             <Text style={styles.tagline}>Find pickup games near you.</Text>
           </View>
 
@@ -99,13 +107,12 @@ const styles = StyleSheet.create({
   },
   hero: {
     alignItems: 'center',
-    gap: Spacing.sm,
+    gap: Spacing.md,
   },
-  brand: {
-    color: Colors.accent,
-    fontSize: 48,
-    fontWeight: '800',
-    letterSpacing: -1,
+  logo: {
+    borderRadius: Radius.lg,
+    height: 88,
+    width: 88,
   },
   tagline: {
     color: Colors.textSecondary,

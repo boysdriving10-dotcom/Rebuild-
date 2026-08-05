@@ -1,12 +1,14 @@
-import { Alert, FlatList, StyleSheet, Text, View } from 'react-native';
+import { Alert, FlatList, Image, StyleSheet, Text, View } from 'react-native';
 
 import { GameCard } from '@/components/ui/GameCard';
 import { Screen } from '@/components/ui/Screen';
-import { BottomTabInset, Colors, FontSize, Spacing } from '@/constants/theme';
+import { BottomTabInset, Colors, FontSize, Radius, Spacing } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
 import { useGames } from '@/context/GamesContext';
 import type { Game } from '@/types';
 import { openCourtDirections } from '@/utils/openDirections';
+
+const logo = require('../../../assets/images/ballout-logo.png');
 
 export default function HomeScreen() {
   const { user } = useAuth();
@@ -42,7 +44,12 @@ export default function HomeScreen() {
   return (
     <Screen>
       <View style={styles.header}>
-        <Text style={styles.brand}>BallOut</Text>
+        <Image
+          source={logo}
+          style={styles.logo}
+          accessibilityLabel="BallOut"
+          resizeMode="contain"
+        />
         <Text style={styles.subtitle}>Nearby pickup games</Text>
       </View>
 
@@ -79,11 +86,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.xl,
     paddingTop: Spacing.md,
   },
-  brand: {
-    color: Colors.accent,
-    fontSize: FontSize['2xl'],
-    fontWeight: '800',
-    letterSpacing: -0.5,
+  logo: {
+    borderRadius: Radius.sm,
+    height: 36,
+    width: 36,
   },
   subtitle: {
     color: Colors.textSecondary,
