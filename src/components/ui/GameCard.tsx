@@ -10,9 +10,21 @@ type GameCardProps = {
   onJoin: (game: Game) => void;
   onLeave: (game: Game) => void;
   onDirections: (game: Game) => void;
+  /** When set, shows a View Court action (used by My Games). */
+  onViewCourt?: (game: Game) => void;
+  /** My Games layout: Directions, View Court, Leave — no Join. */
+  mode?: 'nearby' | 'mine';
 };
 
-export function GameCard({ game, joined, onJoin, onLeave, onDirections }: GameCardProps) {
+export function GameCard({
+  game,
+  joined,
+  onJoin,
+  onLeave,
+  onDirections,
+  onViewCourt,
+  mode = 'nearby',
+}: GameCardProps) {
   const spotsLeft = game.maxPlayers - game.currentPlayers;
   const full = spotsLeft <= 0;
 
@@ -39,7 +51,17 @@ export function GameCard({ game, joined, onJoin, onLeave, onDirections }: GameCa
         />
       </View>
 
-      {joined ? (
+      {mode === 'mine' ? (
+        <View style={styles.actions}>
+          <Button title="Get Directions" variant="outline" onPress={() => onDirections(game)} />
+          {onViewCourt ? (
+            <Button title="View Court" variant="secondary" onPress={() => onViewCourt(game)} />
+          ) : null}
+          {joined ? (
+            <Button title="Leave Game" variant="secondary" onPress={() => onLeave(game)} />
+          ) : null}
+        </View>
+      ) : joined ? (
         <View style={styles.actions}>
           <Button title="Leave Game" variant="secondary" onPress={() => onLeave(game)} />
           <Button title="Get Directions" variant="outline" onPress={() => onDirections(game)} />

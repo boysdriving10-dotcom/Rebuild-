@@ -1,4 +1,6 @@
+import { useMemo } from 'react';
 import { Alert, FlatList, Image, StyleSheet, Text, View } from 'react-native';
+import { router } from 'expo-router';
 
 import { GameCard } from '@/components/ui/GameCard';
 import { Screen } from '@/components/ui/Screen';
@@ -13,6 +15,19 @@ const logo = require('../../../assets/images/ballout-logo.png');
 export default function HomeScreen() {
   const { user } = useAuth();
   const { games, joinGame, leaveGame, isJoined } = useGames();
+
+  const myGames = useMemo(() => {
+    if (!user) return [];
+    return games.filter(
+      (g) => g.hostId === user.id || g.playerIds.includes(user.id)
+    );
+  }, [games, user]);
+
+  const nearbyGames = useMemo(() => {
+    if (!user) return games;
+    const myIds = new Set(myGames.map((g) => g.id));
+    return games.filter((g) => !myIds.has(g.id));
+  }, [games, myGames, user]);
 
   const handleJoin = (game: Game) => {
     if (!user) return;
@@ -41,6 +56,19 @@ export default function HomeScreen() {
     });
   };
 
+  const handleViewCourt = (game: Game) => {
+    router.push({
+      pathname: '/(tabs)/map',
+      params: {
+        focusCourtId: game.courtId,
+        focusName: game.courtName,
+        focusAddress: game.courtAddress,
+        focusLatitude: String(game.courtLatitude),
+        focusLongitude: String(game.courtLongitude),
+      },
+    });
+  };
+
   return (
     <Screen>
       <View style={styles.header}>
@@ -50,15 +78,37 @@ export default function HomeScreen() {
           accessibilityLabel="BallOut"
           resizeMode="contain"
         />
-        <Text style={styles.subtitle}>Nearby pickup games</Text>
       </View>
 
       <FlatList
-        data={games}
+        data={nearbyGames}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.list}
         showsVerticalScrollIndicator={false}
         ItemSeparatorComponent={() => <View style={styles.separator} />}
+        ListHeaderComponent={
+          <View style={styles.sections}>
+            <Text style={styles.sectionTitle}>My Games</Text>
+            {myGames.length === 0 ? (
+              <Text style={styles.emptyInline}>No active games yet.</Text>
+            ) : (
+              myGames.map((game) => (
+                <View key={game.id} style={styles.cardWrap}>
+                  <GameCard
+                    game={game}
+                    mode="mine"
+                    joined={user ? isJoined(game.id, user.id) : false}
+                    onJoin={handleJoin}
+                    onLeave={handleLeave}
+                    onDirections={handleDirections}
+                    onViewCourt={handleViewCourt}
+                  />
+                </View>
+              ))
+            )}
+            <Text style={[styles.sectionTitle, styles.nearbyTitle]}>Nearby Games</Text>
+          </View>
+        }
         renderItem={({ item }) => (
           <GameCard
             game={item}
@@ -82,7 +132,7 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   header: {
     gap: Spacing.xs,
-    paddingBottom: Spacing.lg,
+    paddingBottom: Spacing.md,
     paddingHorizontal: Spacing.xl,
     paddingTop: Spacing.md,
   },
@@ -91,14 +141,31 @@ const styles = StyleSheet.create({
     height: 36,
     width: 36,
   },
-  subtitle: {
-    color: Colors.textSecondary,
-    fontSize: FontSize.md,
-    fontWeight: '500',
-  },
   list: {
     paddingBottom: BottomTabInset + Spacing.xl,
     paddingHorizontal: Spacing.xl,
+  },
+  sections: {
+    paddingBottom: Spacing.md,
+  },
+  sectionTitle: {
+    color: Colors.text,
+    fontSize: FontSize.xl,
+    fontWeight: '800',
+    letterSpacing: -0.3,
+    marginBottom: Spacing.md,
+  },
+  nearbyTitle: {
+    marginTop: Spacing.xl,
+  },
+  emptyInline: {
+    color: Colors.textSecondary,
+    fontSize: FontSize.md,
+    fontWeight: '500',
+    marginBottom: Spacing.sm,
+  },
+  cardWrap: {
+    marginBottom: Spacing.md,
   },
   separator: {
     height: Spacing.md,
@@ -106,7 +173,7 @@ const styles = StyleSheet.create({
   empty: {
     alignItems: 'center',
     gap: Spacing.sm,
-    paddingTop: Spacing['5xl'],
+    paddingTop: Spacing.lg,
   },
   emptyTitle: {
     color: Colors.text,
