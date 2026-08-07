@@ -3,10 +3,8 @@ import type { Region } from 'react-native-maps';
 import type { Court } from '@/types';
 
 const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
-const REQUEST_TIMEOUT_MS = 12_000;
-const MAX_RESULTS = 50;
 /** Skip Overpass when the viewport is wider than this (degrees of latitude). */
-export const MAX_SEARCH_LATITUDE_DELTA = 0.35;
+export const MAX_SEARCH_LATITUDE_DELTA = 0.8;
 
 type OverpassElement = {
   type: 'node' | 'way' | 'relation';
@@ -26,9 +24,8 @@ type CacheEntry = {
   savedAt: number;
 };
 
-const regionCache = new Map<string, CacheEntry>();
-const CACHE_TTL_MS = 10 * 60 * 1000;
-const MAX_CACHE_ENTRIES = 40;
+const courtsCache = new Map<string, CacheEntry>();
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
 export type BBox = {
   south: number;
@@ -52,36 +49,25 @@ export function isRegionTooZoomedOut(region: Region): boolean {
   return region.latitudeDelta > MAX_SEARCH_LATITUDE_DELTA;
 }
 
-/** Stable cache key for a viewport (rounded by zoom). */
-export function getRegionCacheKey(region: Region): string {
-  const precision = region.latitudeDelta > 0.15 ? 2 : region.latitudeDelta > 0.05 ? 3 : 4;
-  const round = (n: number) => n.toFixed(precision);
-  return [
-    round(region.latitude),
-    round(region.longitude),
-    round(region.latitudeDelta),
-    round(region.longitudeDelta),
-  ].join(':');
+/** Prototype-style cache key: visible bounds rounded to 2 decimal places. */
+export function getBoundsCacheKey(bbox: BBox): string {
+  return `${bbox.south.toFixed(2)},${bbox.west.toFixed(2)},${bbox.north.toFixed(2)},${bbox.east.toFixed(2)}`;
 }
 
 export function getCachedCourts(region: Region): Court[] | null {
-  const key = getRegionCacheKey(region);
-  const entry = regionCache.get(key);
+  const key = getBoundsCacheKey(regionToBBox(region));
+  const entry = courtsCache.get(key);
   if (!entry) return null;
   if (Date.now() - entry.savedAt > CACHE_TTL_MS) {
-    regionCache.delete(key);
+    courtsCache.delete(key);
     return null;
   }
   return entry.courts;
 }
 
 function setCachedCourts(region: Region, courts: Court[]) {
-  const key = getRegionCacheKey(region);
-  regionCache.set(key, { courts, savedAt: Date.now() });
-  if (regionCache.size > MAX_CACHE_ENTRIES) {
-    const oldest = regionCache.keys().next().value;
-    if (oldest) regionCache.delete(oldest);
-  }
+  const key = getBoundsCacheKey(regionToBBox(region));
+  courtsCache.set(key, { courts, savedAt: Date.now() });
 }
 
 function buildAddress(tags: Record<string, string> | undefined): string {
@@ -117,7 +103,6 @@ export function dedupeCourts(courts: Court[]): Court[] {
   const out: Court[] = [];
   for (const court of courts) {
     if (seen.has(court.id)) continue;
-    // Also dedupe near-identical coordinates
     const coordKey = `${court.latitude.toFixed(5)},${court.longitude.toFixed(5)}`;
     if (seen.has(coordKey)) continue;
     seen.add(court.id);
@@ -127,47 +112,53 @@ export function dedupeCourts(courts: Court[]): Court[] {
   return out;
 }
 
+/** Prototype Overpass coverage — one request, uncapped out center. */
 function buildOverpassQuery(bbox: BBox): string {
   const { south, west, north, east } = bbox;
   const box = `${south},${west},${north},${east}`;
   return `
-[out:json][timeout:10];
+[out:json][timeout:25];
 (
   node["leisure"="pitch"]["sport"="basketball"](${box});
   way["leisure"="pitch"]["sport"="basketball"](${box});
-  relation["leisure"="pitch"]["sport"="basketball"](${box});
-  node["sport"="basketball"]["leisure"="sports_centre"](${box});
-  way["sport"="basketball"]["leisure"="sports_centre"](${box});
+  node["sport"="basketball"](${box});
 );
-out center ${MAX_RESULTS};
+out center;
 `.trim();
 }
 
 export type FetchCourtsResult =
   | { ok: true; courts: Court[]; fromCache: boolean }
-  | { ok: false; error: string; aborted?: boolean };
+  | { ok: false; error: string };
 
-export async function fetchCourtsInRegion(
-  region: Region,
-  signal?: AbortSignal
-): Promise<FetchCourtsResult> {
+/**
+ * Fetch courts for the visible region.
+ * No short client abort — lets the 25s Overpass server timeout finish.
+ * No silent retries / failover (prototype behavior).
+ */
+export async function fetchCourtsInRegion(region: Region): Promise<FetchCourtsResult> {
   if (isRegionTooZoomedOut(region)) {
     return { ok: true, courts: [], fromCache: false };
   }
 
   const cached = getCachedCourts(region);
   if (cached) {
+    if (__DEV__) {
+      console.log('[courts] cache hit', {
+        key: getBoundsCacheKey(regionToBBox(region)),
+        count: cached.length,
+      });
+    }
     return { ok: true, courts: cached, fromCache: true };
   }
 
   const bbox = regionToBBox(region);
   const query = buildOverpassQuery(bbox);
+  const startedAt = Date.now();
 
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  signal?.addEventListener('abort', onAbort);
-
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  if (__DEV__) {
+    console.log('[courts] search started', { bbox });
+  }
 
   try {
     const response = await fetch(OVERPASS_URL, {
@@ -176,33 +167,47 @@ export async function fetchCourtsInRegion(
         'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
       },
       body: `data=${encodeURIComponent(query)}`,
-      signal: controller.signal,
     });
 
     if (!response.ok) {
-      return { ok: false, error: 'Could not load courts. Check your connection and try again.' };
+      if (__DEV__) {
+        console.log('[courts] request failure', {
+          status: response.status,
+          durationMs: Date.now() - startedAt,
+        });
+      }
+      return {
+        ok: false,
+        error: 'Could not load courts. Check your connection and try again.',
+      };
     }
 
     const json = (await response.json()) as OverpassResponse;
     const mapped = (json.elements ?? [])
       .map(elementToCourt)
       .filter((c): c is Court => c !== null);
-    const courts = dedupeCourts(mapped).slice(0, MAX_RESULTS);
+    const courts = dedupeCourts(mapped);
     setCachedCourts(region, courts);
+
+    if (__DEV__) {
+      console.log('[courts] request success', {
+        durationMs: Date.now() - startedAt,
+        resultCount: courts.length,
+      });
+    }
+
     return { ok: true, courts, fromCache: false };
   } catch (err) {
-    const aborted =
-      (err instanceof Error && err.name === 'AbortError') || controller.signal.aborted;
-    if (aborted) {
-      return { ok: false, error: 'Request cancelled', aborted: true };
+    if (__DEV__) {
+      console.log('[courts] request failure', {
+        error: err instanceof Error ? err.message : String(err),
+        durationMs: Date.now() - startedAt,
+      });
     }
     return {
       ok: false,
-      error: 'Courts are taking too long to load. Try again.',
+      error: 'Could not load courts. Check your connection and try again.',
     };
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener('abort', onAbort);
   }
 }
 

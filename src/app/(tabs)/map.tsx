@@ -42,9 +42,7 @@ export default function MapScreen() {
   const {
     courts,
     loading,
-    error,
     zoomedOut,
-    retry,
     onRegionChangeComplete,
   } = useMapCourts(DEFAULT_REGION);
 
@@ -85,6 +83,7 @@ export default function MapScreen() {
     };
   }, []);
 
+  // Center on user; Overpass loads via onRegionChangeComplete (prototype-style).
   useEffect(() => {
     if (!mapReady || !userCoord || didCenterOnUser.current) return;
     didCenterOnUser.current = true;
@@ -97,6 +96,14 @@ export default function MapScreen() {
     mapRef.current?.animateToRegion(region, 450);
     onRegionChangeComplete(region);
   }, [mapReady, userCoord, onRegionChangeComplete]);
+
+  // Location denied: still search the default visible region once.
+  useEffect(() => {
+    if (locationStatus !== 'denied') return;
+    if (didCenterOnUser.current) return;
+    didCenterOnUser.current = true;
+    onRegionChangeComplete(DEFAULT_REGION);
+  }, [locationStatus, onRegionChangeComplete]);
 
   const recenter = useCallback(() => {
     if (!userCoord) return;
@@ -243,15 +250,6 @@ export default function MapScreen() {
         </View>
       ) : null}
 
-      {error && !loading ? (
-        <View style={styles.errorBar}>
-          <Text style={styles.errorText}>{error}</Text>
-          <Pressable onPress={retry} style={styles.retryBtn}>
-            <Text style={styles.retryText}>Retry</Text>
-          </Pressable>
-        </View>
-      ) : null}
-
       {locationStatus === 'granted' && userCoord ? (
         <Pressable
           accessibilityLabel="Recenter on my location"
@@ -382,39 +380,6 @@ const styles = StyleSheet.create({
     color: Colors.text,
     fontSize: FontSize.sm,
     fontWeight: '600',
-  },
-  errorBar: {
-    alignItems: 'center',
-    alignSelf: 'center',
-    backgroundColor: Colors.surfaceElevated,
-    borderColor: Colors.border,
-    borderRadius: Radius.lg,
-    borderWidth: 1,
-    bottom: 120,
-    flexDirection: 'row',
-    gap: Spacing.md,
-    maxWidth: '90%',
-    paddingHorizontal: Spacing.lg,
-    paddingVertical: Spacing.md,
-    position: 'absolute',
-    zIndex: 8,
-  },
-  errorText: {
-    color: Colors.textSecondary,
-    flexShrink: 1,
-    fontSize: FontSize.sm,
-    fontWeight: '500',
-  },
-  retryBtn: {
-    backgroundColor: Colors.accent,
-    borderRadius: Radius.sm,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-  },
-  retryText: {
-    color: Colors.white,
-    fontSize: FontSize.sm,
-    fontWeight: '700',
   },
   recenter: {
     alignItems: 'center',
