@@ -80,14 +80,86 @@ function setCachedCourts(region: Region, courts: Court[]) {
   courtsCache.set(key, { courts, savedAt: Date.now() });
 }
 
+/** Names that are too generic to prefer over place/street context. */
+const GENERIC_COURT_NAMES = new Set([
+  'basketball court',
+  'basketball',
+  'court',
+  'basketball pitch',
+  'pitch',
+  'basketball courts',
+]);
+
+function isGenericCourtName(name: string): boolean {
+  return GENERIC_COURT_NAMES.has(name.trim().toLowerCase());
+}
+
+function streetFromTags(tags: Record<string, string>): string {
+  return [tags['addr:housenumber'], tags['addr:street']].filter(Boolean).join(' ');
+}
+
+function cityFromTags(tags: Record<string, string>): string {
+  return (
+    tags['addr:city'] ||
+    tags['addr:town'] ||
+    tags['addr:village'] ||
+    tags['addr:suburb'] ||
+    tags['addr:neighbourhood'] ||
+    ''
+  );
+}
+
+/** Park / place context already present on the OSM element (no extra fetch). */
+function placeFromTags(tags: Record<string, string>): string {
+  const candidates = [
+    tags['is_in:park'],
+    tags['addr:place'],
+    tags.place,
+    tags['is_in'],
+  ];
+  for (const value of candidates) {
+    if (value && !isGenericCourtName(value)) return value;
+  }
+  return '';
+}
+
 function buildAddress(tags: Record<string, string> | undefined): string {
   if (!tags) return 'Address unavailable';
-  const street = [tags['addr:housenumber'], tags['addr:street']].filter(Boolean).join(' ');
-  const city = tags['addr:city'] || tags['addr:town'] || tags['addr:suburb'] || '';
-  const parts = [street, city].filter(Boolean);
+  const street = streetFromTags(tags);
+  const city = cityFromTags(tags);
+  const place = placeFromTags(tags);
+  const parts = [street || place, city].filter(Boolean);
   if (parts.length > 0) return parts.join(', ');
   if (tags['addr:full']) return tags['addr:full'];
   return 'Address unavailable';
+}
+
+/**
+ * Prefer a real OSM name; if only generic, build from street/park/place/city tags.
+ * Never invent names when no reliable tag context exists.
+ */
+function buildDisplayName(tags: Record<string, string>): string {
+  const namedCandidates = [
+    tags.name,
+    tags['name:en'],
+    tags.official_name,
+    tags.alt_name,
+    tags.loc_name,
+  ].filter(Boolean) as string[];
+
+  for (const candidate of namedCandidates) {
+    if (!isGenericCourtName(candidate)) return candidate;
+  }
+
+  const street = tags['addr:street'];
+  const place = placeFromTags(tags);
+  const city =
+    tags['addr:city'] || tags['addr:town'] || tags['addr:village'] || '';
+
+  if (street) return `Basketball Court on ${street}`;
+  if (place) return `Basketball Court · ${place}`;
+  if (city) return `Basketball Court · ${city}`;
+  return 'Basketball Court';
 }
 
 function elementToCourt(el: OverpassElement): Court | null {
@@ -96,11 +168,10 @@ function elementToCourt(el: OverpassElement): Court | null {
   if (lat == null || lon == null) return null;
 
   const tags = el.tags ?? {};
-  const name = tags.name || tags['name:en'] || 'Basketball Court';
 
   return {
     id: `osm-${el.type}-${el.id}`,
-    name,
+    name: buildDisplayName(tags),
     latitude: lat,
     longitude: lon,
     address: buildAddress(tags),
@@ -304,6 +375,7 @@ export async function fetchCourtsInRegion(
   return { ok: false, error: lastError };
 }
 
+/** Case-insensitive partial match on court name and address (street / city / place). */
 export function filterCourtsByQuery(courts: Court[], query: string): Court[] {
   const q = query.trim().toLowerCase();
   if (!q) return courts;

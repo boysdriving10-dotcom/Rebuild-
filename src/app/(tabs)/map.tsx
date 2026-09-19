@@ -48,7 +48,9 @@ export default function MapScreen() {
     onRegionChangeComplete,
   } = useMapCourts(DEFAULT_REGION);
 
-  const visibleCourts = useMemo(() => filterCourtsByQuery(courts, query), [courts, query]);
+  const searchResults = useMemo(() => filterCourtsByQuery(courts, query), [courts, query]);
+  const trimmedQuery = query.trim();
+  const showSearchPanel = trimmedQuery.length > 0;
   const courtGames = selectedCourt ? getGamesForCourt(selectedCourt.id) : [];
 
   useEffect(() => {
@@ -178,7 +180,7 @@ export default function MapScreen() {
         userInterfaceStyle="dark"
         onMapReady={() => setMapReady(true)}
         onRegionChangeComplete={(region) => onRegionChangeComplete(region)}>
-        {visibleCourts.map((court) => {
+        {courts.map((court) => {
           const count = getGamesForCourt(court.id).length;
           return (
             <Marker
@@ -204,28 +206,36 @@ export default function MapScreen() {
       <View style={[styles.searchWrap, { top: insets.top + Spacing.sm }]}>
         <TextInput
           style={styles.searchInput}
-          placeholder="Search courts..."
+          placeholder="Search courts"
           placeholderTextColor={Colors.textMuted}
           value={query}
           onChangeText={setQuery}
           selectionColor={Colors.accent}
           returnKeyType="search"
           clearButtonMode="while-editing"
+          autoCorrect={false}
+          autoCapitalize="none"
         />
-        {query.length > 0 && visibleCourts.length > 0 ? (
+        {showSearchPanel ? (
           <View style={styles.results}>
-            {visibleCourts.slice(0, 5).map((court) => (
-              <Pressable
-                key={court.id}
-                style={styles.resultRow}
-                onPress={() => {
-                  setQuery(court.name);
-                  focusCourt(court);
-                }}>
-                <Text style={styles.resultName}>{court.name}</Text>
-                <Text style={styles.resultMeta}>{court.address}</Text>
-              </Pressable>
-            ))}
+            {searchResults.length === 0 ? (
+              <View style={styles.resultRow}>
+                <Text style={styles.emptyResults}>No courts found</Text>
+              </View>
+            ) : (
+              searchResults.slice(0, 5).map((court) => (
+                <Pressable
+                  key={court.id}
+                  style={styles.resultRow}
+                  onPress={() => {
+                    setQuery('');
+                    focusCourt(court);
+                  }}>
+                  <Text style={styles.resultName}>{court.name}</Text>
+                  <Text style={styles.resultMeta}>{court.address}</Text>
+                </Pressable>
+              ))
+            )}
           </View>
         ) : null}
       </View>
@@ -336,6 +346,11 @@ const styles = StyleSheet.create({
   resultMeta: {
     color: Colors.textSecondary,
     fontSize: FontSize.xs,
+  },
+  emptyResults: {
+    color: Colors.textSecondary,
+    fontSize: FontSize.md,
+    fontWeight: '500',
   },
   banner: {
     backgroundColor: Colors.surfaceElevated,
