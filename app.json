@@ -12,7 +12,7 @@
       "icon": "./assets/images/icon.png",
       "supportsTablet": true,
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "BallOut uses your location to show nearby basketball courts and pickup games.",
+        "NSLocationWhenInUseUsageDescription": "BallOut uses your location to find nearby basketball courts on the map and to recenter the map on you.",
         "ITSAppUsesNonExemptEncryption": false
       }
     },
@@ -40,7 +40,7 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "BallOut uses your location to show nearby basketball courts and pickup games."
+          "locationWhenInUsePermission": "BallOut uses your location to find nearby basketball courts on the map and to recenter the map on you."
         }
       ],
       [

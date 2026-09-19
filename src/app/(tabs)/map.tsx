@@ -42,7 +42,9 @@ export default function MapScreen() {
   const {
     courts,
     loading,
+    error,
     zoomedOut,
+    retry,
     onRegionChangeComplete,
   } = useMapCourts(DEFAULT_REGION);
 
@@ -231,8 +233,8 @@ export default function MapScreen() {
       {locationStatus === 'denied' ? (
         <View style={[styles.banner, { top: insets.top + 64 }]}>
           <Text style={styles.bannerText}>
-            Location is off. You can still browse the map — enable location to jump to courts near
-            you.
+            Location is off. You can still browse the map — enable it so BallOut can find basketball
+            courts near you and recenter the map.
           </Text>
         </View>
       ) : null}
@@ -240,6 +242,15 @@ export default function MapScreen() {
       {zoomedOut ? (
         <View style={styles.hintBar}>
           <Text style={styles.hintText}>Zoom in to load basketball courts</Text>
+        </View>
+      ) : null}
+
+      {error && !loading && !zoomedOut ? (
+        <View style={styles.errorBar}>
+          <Text style={styles.errorText}>{error}</Text>
+          <Pressable onPress={retry} hitSlop={8} accessibilityRole="button">
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
         </View>
       ) : null}
 
@@ -360,6 +371,36 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
     fontSize: FontSize.sm,
     fontWeight: '600',
+  },
+  errorBar: {
+    alignItems: 'center',
+    alignSelf: 'center',
+    backgroundColor: Colors.surfaceElevated,
+    borderColor: Colors.border,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    bottom: 120,
+    flexDirection: 'row',
+    gap: Spacing.md,
+    left: Spacing.lg,
+    maxWidth: 420,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.sm,
+    position: 'absolute',
+    right: Spacing.lg,
+    zIndex: 8,
+  },
+  errorText: {
+    color: Colors.textSecondary,
+    flex: 1,
+    fontSize: FontSize.sm,
+    fontWeight: '500',
+    lineHeight: 18,
+  },
+  retryText: {
+    color: Colors.accent,
+    fontSize: FontSize.sm,
+    fontWeight: '700',
   },
   loadingPill: {
     alignItems: 'center',

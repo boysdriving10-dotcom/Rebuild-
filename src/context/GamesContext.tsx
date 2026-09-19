@@ -9,6 +9,7 @@ type GamesContextValue = {
   createGame: (input: CreateGameInput, host: { id: string; username: string }) => ActionResult;
   joinGame: (gameId: string, userId: string) => ActionResult;
   leaveGame: (gameId: string, userId: string) => ActionResult;
+  removeUserData: (userId: string) => void;
   getGamesForCourt: (courtId: string) => Game[];
   isJoined: (gameId: string, userId: string) => boolean;
   countHosted: (userId: string) => number;
@@ -92,6 +93,22 @@ export function GamesProvider({ children }: { children: ReactNode }) {
     return { ok: true, game: updated };
   }, [games]);
 
+  const removeUserData = useCallback((userId: string) => {
+    setGames((prev) =>
+      prev
+        .filter((g) => g.hostId !== userId)
+        .map((g) => {
+          if (!g.playerIds.includes(userId)) return g;
+          const playerIds = g.playerIds.filter((id) => id !== userId);
+          return {
+            ...g,
+            playerIds,
+            currentPlayers: playerIds.length,
+          };
+        })
+    );
+  }, []);
+
   const getGamesForCourt = useCallback(
     (courtId: string) => games.filter((g) => g.courtId === courtId),
     [games]
@@ -122,6 +139,7 @@ export function GamesProvider({ children }: { children: ReactNode }) {
       createGame,
       joinGame,
       leaveGame,
+      removeUserData,
       getGamesForCourt,
       isJoined,
       countHosted,
@@ -132,6 +150,7 @@ export function GamesProvider({ children }: { children: ReactNode }) {
       createGame,
       joinGame,
       leaveGame,
+      removeUserData,
       getGamesForCourt,
       isJoined,
       countHosted,

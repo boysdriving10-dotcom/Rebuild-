@@ -14,6 +14,7 @@ type AuthContextValue = {
     confirmPassword: string;
   }) => { ok: true } | { ok: false; error: string };
   logout: () => void;
+  deleteAccount: () => void;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -64,6 +65,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { ok: true };
       },
       logout: () => setUser(null),
+      // Mock auth — account lives only in memory; clearing the session deletes it.
+      deleteAccount: () => setUser(null),
     }),
     [user]
   );

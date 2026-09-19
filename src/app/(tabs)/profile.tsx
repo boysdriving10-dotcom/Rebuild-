@@ -1,4 +1,4 @@
-import { StyleSheet, Text, View } from 'react-native';
+import { Alert, StyleSheet, Text, View } from 'react-native';
 
 import { Avatar } from '@/components/ui/Avatar';
 import { Button } from '@/components/ui/Button';
@@ -8,8 +8,8 @@ import { useAuth } from '@/context/AuthContext';
 import { useGames } from '@/context/GamesContext';
 
 export default function ProfileScreen() {
-  const { user, logout } = useAuth();
-  const { countHosted, countJoined } = useGames();
+  const { user, logout, deleteAccount } = useAuth();
+  const { countHosted, countJoined, removeUserData } = useGames();
 
   if (!user) {
     return null;
@@ -17,6 +17,24 @@ export default function ProfileScreen() {
 
   const hosted = countHosted(user.id);
   const joined = countJoined(user.id);
+
+  const handleDeleteAccount = () => {
+    Alert.alert(
+      'Delete Account',
+      'This permanently deletes your account and removes you from any games. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete Account',
+          style: 'destructive',
+          onPress: () => {
+            removeUserData(user.id);
+            deleteAccount();
+          },
+        },
+      ]
+    );
+  };
 
   return (
     <Screen edges={['top', 'bottom']}>
@@ -33,7 +51,15 @@ export default function ProfileScreen() {
           <Stat label="Games Joined" value={joined} />
         </View>
 
-        <Button title="Log Out" variant="outline" onPress={logout} style={styles.logout} />
+        <View style={styles.actions}>
+          <Button title="Log Out" variant="outline" onPress={logout} style={styles.actionButton} />
+          <Button
+            title="Delete Account"
+            variant="outline"
+            onPress={handleDeleteAccount}
+            style={styles.actionButton}
+          />
+        </View>
       </View>
     </Screen>
   );
@@ -101,8 +127,12 @@ const styles = StyleSheet.create({
     fontSize: FontSize.sm,
     fontWeight: '600',
   },
-  logout: {
+  actions: {
+    gap: Spacing.md,
     marginTop: Spacing.md,
+    width: '100%',
+  },
+  actionButton: {
     width: '100%',
   },
 });

@@ -2,7 +2,17 @@ import type { Region } from 'react-native-maps';
 
 import type { Court } from '@/types';
 
-const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://lz4.overpass-api.de/api/interpreter',
+] as const;
+
+/** Client abort — Overpass query also sets [timeout:25]. */
+const REQUEST_TIMEOUT_MS = 15_000;
+/** Extra attempts after the first (total attempts = 1 + MAX_RETRIES). */
+const MAX_RETRIES = 2;
+const RETRY_BASE_DELAY_MS = 800;
+
 /** Skip Overpass when the viewport is wider than this (degrees of latitude). */
 export const MAX_SEARCH_LATITUDE_DELTA = 0.8;
 
@@ -131,12 +141,97 @@ export type FetchCourtsResult =
   | { ok: true; courts: Court[]; fromCache: boolean }
   | { ok: false; error: string };
 
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function isAbortError(err: unknown): boolean {
+  return (
+    (err instanceof Error && err.name === 'AbortError') ||
+    (typeof DOMException !== 'undefined' && err instanceof DOMException && err.name === 'AbortError')
+  );
+}
+
+function errorMessageForStatus(status: number): string {
+  if (status === 429) {
+    return 'Court data is rate-limited right now. Try again in a moment.';
+  }
+  if (status === 503 || status === 502 || status === 504) {
+    return 'Court service is busy. Tap retry or pan the map to try again.';
+  }
+  return 'Could not load courts. Check your connection and try again.';
+}
+
+type AttemptResult =
+  | { ok: true; courts: Court[] }
+  | { ok: false; retryable: boolean; error: string };
+
+async function fetchOnce(
+  endpoint: string,
+  query: string,
+  externalSignal?: AbortSignal
+): Promise<AttemptResult> {
+  const controller = new AbortController();
+  const onExternalAbort = () => controller.abort();
+  externalSignal?.addEventListener('abort', onExternalAbort);
+
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+      },
+      body: `data=${encodeURIComponent(query)}`,
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const retryable = response.status === 429 || response.status >= 500;
+      return {
+        ok: false,
+        retryable,
+        error: errorMessageForStatus(response.status),
+      };
+    }
+
+    const json = (await response.json()) as OverpassResponse;
+    const mapped = (json.elements ?? [])
+      .map(elementToCourt)
+      .filter((c): c is Court => c !== null);
+    return { ok: true, courts: dedupeCourts(mapped) };
+  } catch (err) {
+    if (externalSignal?.aborted) {
+      return { ok: false, retryable: false, error: 'Request cancelled.' };
+    }
+    if (isAbortError(err)) {
+      return {
+        ok: false,
+        retryable: true,
+        error: 'Court search timed out. Tap retry or pan the map.',
+      };
+    }
+    return {
+      ok: false,
+      retryable: true,
+      error: 'Could not load courts. Check your connection and try again.',
+    };
+  } finally {
+    clearTimeout(timer);
+    externalSignal?.removeEventListener('abort', onExternalAbort);
+  }
+}
+
 /**
  * Fetch courts for the visible region.
- * No short client abort — lets the 25s Overpass server timeout finish.
- * No silent retries / failover (prototype behavior).
+ * Uses in-memory bbox cache, client timeout, and retries with backoff on
+ * timeouts / 429 / 5xx (rotates Overpass endpoints).
  */
-export async function fetchCourtsInRegion(region: Region): Promise<FetchCourtsResult> {
+export async function fetchCourtsInRegion(
+  region: Region,
+  options?: { signal?: AbortSignal }
+): Promise<FetchCourtsResult> {
   if (isRegionTooZoomedOut(region)) {
     return { ok: true, courts: [], fromCache: false };
   }
@@ -155,60 +250,58 @@ export async function fetchCourtsInRegion(region: Region): Promise<FetchCourtsRe
   const bbox = regionToBBox(region);
   const query = buildOverpassQuery(bbox);
   const startedAt = Date.now();
+  let lastError = 'Could not load courts. Check your connection and try again.';
 
   if (__DEV__) {
     console.log('[courts] search started', { bbox });
   }
 
-  try {
-    const response = await fetch(OVERPASS_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-      },
-      body: `data=${encodeURIComponent(query)}`,
-    });
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (options?.signal?.aborted) {
+      return { ok: false, error: 'Request cancelled.' };
+    }
 
-    if (!response.ok) {
+    if (attempt > 0) {
+      const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      await sleep(delay);
+      if (options?.signal?.aborted) {
+        return { ok: false, error: 'Request cancelled.' };
+      }
+    }
+
+    const endpoint = OVERPASS_ENDPOINTS[attempt % OVERPASS_ENDPOINTS.length];
+    const result = await fetchOnce(endpoint, query, options?.signal);
+
+    if (result.ok) {
+      setCachedCourts(region, result.courts);
       if (__DEV__) {
-        console.log('[courts] request failure', {
-          status: response.status,
+        console.log('[courts] request success', {
           durationMs: Date.now() - startedAt,
+          resultCount: result.courts.length,
+          attempt: attempt + 1,
+          endpoint,
         });
       }
-      return {
-        ok: false,
-        error: 'Could not load courts. Check your connection and try again.',
-      };
+      return { ok: true, courts: result.courts, fromCache: false };
     }
 
-    const json = (await response.json()) as OverpassResponse;
-    const mapped = (json.elements ?? [])
-      .map(elementToCourt)
-      .filter((c): c is Court => c !== null);
-    const courts = dedupeCourts(mapped);
-    setCachedCourts(region, courts);
-
+    lastError = result.error;
     if (__DEV__) {
-      console.log('[courts] request success', {
-        durationMs: Date.now() - startedAt,
-        resultCount: courts.length,
-      });
-    }
-
-    return { ok: true, courts, fromCache: false };
-  } catch (err) {
-    if (__DEV__) {
-      console.log('[courts] request failure', {
-        error: err instanceof Error ? err.message : String(err),
+      console.log('[courts] attempt failed', {
+        attempt: attempt + 1,
+        endpoint,
+        error: result.error,
+        retryable: result.retryable,
         durationMs: Date.now() - startedAt,
       });
     }
-    return {
-      ok: false,
-      error: 'Could not load courts. Check your connection and try again.',
-    };
+
+    if (!result.retryable) {
+      break;
+    }
   }
+
+  return { ok: false, error: lastError };
 }
 
 export function filterCourtsByQuery(courts: Court[], query: string): Court[] {

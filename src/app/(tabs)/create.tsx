@@ -1,5 +1,5 @@
 import { router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -18,7 +18,6 @@ import { Stepper } from '@/components/ui/Stepper';
 import { BottomTabInset, Colors, FontSize, Radius, Spacing } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
 import { useGames } from '@/context/GamesContext';
-import { MOCK_COURTS } from '@/data/mock';
 import type { Court } from '@/types';
 
 const DATE_OPTIONS = ['Today', 'Tomorrow', 'This Weekend'] as const;
@@ -35,7 +34,8 @@ export default function CreateGameScreen() {
   const { user } = useAuth();
   const { createGame } = useGames();
 
-  const paramCourt: Court | null = useMemo(() => {
+  /** Real court from Map → Start Game (OSM id + coords). */
+  const selectedCourt: Court | null = useMemo(() => {
     if (!params.courtId || !params.courtName) return null;
     const lat = Number(params.latitude);
     const lng = Number(params.longitude);
@@ -49,26 +49,10 @@ export default function CreateGameScreen() {
     };
   }, [params.courtId, params.courtName, params.latitude, params.longitude, params.address]);
 
-  const courtOptions = useMemo(() => {
-    if (!paramCourt) return MOCK_COURTS;
-    if (MOCK_COURTS.some((c) => c.id === paramCourt.id)) return MOCK_COURTS;
-    return [paramCourt, ...MOCK_COURTS];
-  }, [paramCourt]);
-
-  const [courtId, setCourtId] = useState(paramCourt?.id ?? MOCK_COURTS[0]?.id ?? '');
   const [date, setDate] = useState<(typeof DATE_OPTIONS)[number]>('Today');
   const [time, setTime] = useState<(typeof TIME_OPTIONS)[number]>('6:00 PM');
   const [maxPlayers, setMaxPlayers] = useState(10);
   const [visibility, setVisibility] = useState<'public' | 'private'>('public');
-
-  useEffect(() => {
-    if (paramCourt) setCourtId(paramCourt.id);
-  }, [paramCourt]);
-
-  const selectedCourt = useMemo(
-    () => courtOptions.find((c) => c.id === courtId),
-    [courtId, courtOptions]
-  );
 
   const onCreate = () => {
     if (!user) {
@@ -76,7 +60,7 @@ export default function CreateGameScreen() {
       return;
     }
     if (!selectedCourt) {
-      Alert.alert('Pick a court', 'Choose a court for your game.');
+      Alert.alert('Pick a court', 'Open the Map tab and choose a court first.');
       return;
     }
 
@@ -129,21 +113,23 @@ export default function CreateGameScreen() {
           </View>
 
           <Field label="Court">
-            <View style={styles.optionList}>
-              {courtOptions.map((court) => {
-                const selected = court.id === courtId;
-                return (
-                  <Pressable
-                    key={court.id}
-                    onPress={() => setCourtId(court.id)}
-                    style={[styles.option, selected && styles.optionSelected]}>
-                    <Text style={[styles.optionText, selected && styles.optionTextSelected]}>
-                      {court.name}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
+            {selectedCourt ? (
+              <View style={[styles.option, styles.optionSelected]}>
+                <Text style={[styles.optionText, styles.optionTextSelected]}>
+                  {selectedCourt.name}
+                </Text>
+                <Text style={styles.optionMeta} numberOfLines={2}>
+                  {selectedCourt.address}
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.pickCourt}>
+                <Text style={styles.pickCourtText}>
+                  Pick a basketball court on the Map, then tap Start Game.
+                </Text>
+                <Button title="Open Map" variant="secondary" onPress={() => router.push('/(tabs)/map')} />
+              </View>
+            )}
           </Field>
 
           <Field label="Date">
@@ -197,7 +183,12 @@ export default function CreateGameScreen() {
             />
           </Field>
 
-          <Button title="Create Game" onPress={onCreate} style={styles.submit} />
+          <Button
+            title="Create Game"
+            onPress={onCreate}
+            disabled={!selectedCourt}
+            style={styles.submit}
+          />
         </ScrollView>
       </KeyboardAvoidingView>
     </Screen>
@@ -253,6 +244,7 @@ const styles = StyleSheet.create({
     borderColor: Colors.border,
     borderRadius: Radius.md,
     borderWidth: 1,
+    gap: 4,
     paddingHorizontal: Spacing.lg,
     paddingVertical: Spacing.md,
   },
@@ -267,6 +259,24 @@ const styles = StyleSheet.create({
   },
   optionTextSelected: {
     color: Colors.text,
+  },
+  optionMeta: {
+    color: Colors.textSecondary,
+    fontSize: FontSize.sm,
+    lineHeight: 18,
+  },
+  pickCourt: {
+    backgroundColor: Colors.surfaceElevated,
+    borderColor: Colors.border,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    gap: Spacing.md,
+    padding: Spacing.lg,
+  },
+  pickCourtText: {
+    color: Colors.textSecondary,
+    fontSize: FontSize.md,
+    lineHeight: 22,
   },
   chipRow: {
     flexDirection: 'row',
