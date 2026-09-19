@@ -90,23 +90,69 @@ const GENERIC_COURT_NAMES = new Set([
   'basketball courts',
 ]);
 
+/** Municipal operators that are not a useful place pin for a specific court. */
+const GENERIC_OPERATORS = new Set([
+  'nyc parks',
+  'new york city department of parks and recreation',
+  'department of parks and recreation',
+  'parks and recreation',
+  'city of new york',
+]);
+
 function isGenericCourtName(name: string): boolean {
   return GENERIC_COURT_NAMES.has(name.trim().toLowerCase());
 }
 
+function isGenericOperator(value: string): boolean {
+  const n = value.trim().toLowerCase();
+  if (GENERIC_OPERATORS.has(n)) return true;
+  return /\bdepartment of parks\b/i.test(n) || /\bparks and recreation\b/i.test(n);
+}
+
+function firstTag(tags: Record<string, string>, keys: string[]): string {
+  for (const key of keys) {
+    const value = tags[key]?.trim();
+    if (value) return value;
+  }
+  return '';
+}
+
 function streetFromTags(tags: Record<string, string>): string {
-  return [tags['addr:housenumber'], tags['addr:street']].filter(Boolean).join(' ');
+  const street =
+    tags['addr:street'] ||
+    tags['addr:road'] ||
+    tags['contact:street'] ||
+    '';
+  const number =
+    tags['addr:housenumber'] ||
+    tags['contact:housenumber'] ||
+    '';
+  return [number, street].filter(Boolean).join(' ');
 }
 
 function cityFromTags(tags: Record<string, string>): string {
-  return (
-    tags['addr:city'] ||
-    tags['addr:town'] ||
-    tags['addr:village'] ||
-    tags['addr:suburb'] ||
-    tags['addr:neighbourhood'] ||
-    ''
-  );
+  return firstTag(tags, [
+    'addr:city',
+    'addr:town',
+    'addr:village',
+    'addr:hamlet',
+    'addr:suburb',
+    'addr:neighbourhood',
+    'addr:neighborhood',
+    'addr:district',
+    'addr:quarter',
+    'is_in:city',
+    'is_in:town',
+    'is_in:village',
+    'is_in:suburb',
+    'is_in:municipality',
+    'is_in:neighbourhood',
+    'is_in:neighborhood',
+  ]);
+}
+
+function stateFromTags(tags: Record<string, string>): string {
+  return firstTag(tags, ['addr:state', 'addr:province', 'is_in:state', 'is_in:province']);
 }
 
 /** Park / place context already present on the OSM element (no extra fetch). */
@@ -114,23 +160,64 @@ function placeFromTags(tags: Record<string, string>): string {
   const candidates = [
     tags['is_in:park'],
     tags['addr:place'],
+    tags['addr:housename'],
     tags.place,
     tags['is_in'],
   ];
   for (const value of candidates) {
-    if (value && !isGenericCourtName(value)) return value;
+    if (value && !isGenericCourtName(value)) return value.trim();
   }
   return '';
 }
 
+/** Strip trailing court wording so a real OSM name can double as a location line. */
+function locationHintFromName(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed || isGenericCourtName(trimmed)) return '';
+  const stripped = trimmed
+    .replace(/\s+basketball\s+courts?\s*$/i, '')
+    .replace(/\s+basketball\s+pitch(es)?\s*$/i, '')
+    .replace(/\s+courts?\s*$/i, '')
+    .trim();
+  return stripped || trimmed;
+}
+
+/**
+ * Build a display/search location string only from tags on this element.
+ * OSM basketball pitches rarely have addr:* — fall back to place / non-generic name / specific operator.
+ */
 function buildAddress(tags: Record<string, string> | undefined): string {
   if (!tags) return 'Address unavailable';
+  if (tags['addr:full']?.trim()) return tags['addr:full'].trim();
+
   const street = streetFromTags(tags);
-  const city = cityFromTags(tags);
   const place = placeFromTags(tags);
-  const parts = [street || place, city].filter(Boolean);
+  const city = cityFromTags(tags);
+  const state = stateFromTags(tags);
+
+  const locality = [city, state].filter(Boolean).join(', ');
+  const primary = street || place;
+  const parts = [primary, locality].filter(Boolean);
   if (parts.length > 0) return parts.join(', ');
-  if (tags['addr:full']) return tags['addr:full'];
+
+  const namedCandidates = [
+    tags.full_name,
+    tags.name,
+    tags['name:en'],
+    tags.official_name,
+    tags.alt_name,
+    tags.loc_name,
+  ];
+  for (const candidate of namedCandidates) {
+    const hint = candidate ? locationHintFromName(candidate) : '';
+    if (hint) return hint;
+  }
+
+  const operator = tags.operator?.trim() || tags['operator:short']?.trim() || '';
+  if (operator && !isGenericOperator(operator) && !isGenericCourtName(operator)) {
+    return operator;
+  }
+
   return 'Address unavailable';
 }
 
@@ -145,16 +232,16 @@ function buildDisplayName(tags: Record<string, string>): string {
     tags.official_name,
     tags.alt_name,
     tags.loc_name,
+    tags.full_name,
   ].filter(Boolean) as string[];
 
   for (const candidate of namedCandidates) {
     if (!isGenericCourtName(candidate)) return candidate;
   }
 
-  const street = tags['addr:street'];
+  const street = streetFromTags(tags) || tags['addr:street'] || '';
   const place = placeFromTags(tags);
-  const city =
-    tags['addr:city'] || tags['addr:town'] || tags['addr:village'] || '';
+  const city = cityFromTags(tags);
 
   if (street) return `Basketball Court on ${street}`;
   if (place) return `Basketball Court · ${place}`;
@@ -375,11 +462,60 @@ export async function fetchCourtsInRegion(
   return { ok: false, error: lastError };
 }
 
-/** Case-insensitive partial match on court name and address (street / city / place). */
+/** Street-suffix tokens ignored so "66 Aberdeen Dr" can match "Aberdeen". */
+const QUERY_SKIP_TOKENS = new Set([
+  'st',
+  'st.',
+  'rd',
+  'rd.',
+  'dr',
+  'dr.',
+  'ave',
+  'ave.',
+  'blvd',
+  'blvd.',
+  'ln',
+  'ln.',
+  'ct',
+  'ct.',
+  'way',
+  'pl',
+  'pl.',
+  'pkwy',
+  'hwy',
+]);
+
+function courtSearchHaystack(court: Court): string {
+  const addr = court.address;
+  // Ignore placeholder copy so search only matches real name/street/city/place text.
+  const searchableAddr =
+    !addr || addr === 'Address unavailable' || addr === 'Finding address...' ? '' : addr;
+  return `${court.name} ${searchableAddr}`.toLowerCase();
+}
+
+/** Significant query tokens: length ≥ 3, not street-suffix abbreviations. */
+function significantQueryTokens(query: string): string[] {
+  return query
+    .toLowerCase()
+    .split(/[\s,./#+]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 3 && !QUERY_SKIP_TOKENS.has(t));
+}
+
+/**
+ * Case-insensitive match on court name + address (street / city / park / place).
+ * Full-string substring OR every significant token must appear (so partial street works).
+ */
 export function filterCourtsByQuery(courts: Court[], query: string): Court[] {
   const q = query.trim().toLowerCase();
   if (!q) return courts;
-  return courts.filter(
-    (c) => c.name.toLowerCase().includes(q) || c.address.toLowerCase().includes(q)
-  );
+
+  const tokens = significantQueryTokens(q);
+
+  return courts.filter((c) => {
+    const haystack = courtSearchHaystack(c);
+    if (haystack.includes(q)) return true;
+    if (tokens.length === 0) return false;
+    return tokens.every((token) => haystack.includes(token));
+  });
 }

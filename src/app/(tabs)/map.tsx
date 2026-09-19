@@ -20,6 +20,7 @@ import { useAuth } from '@/context/AuthContext';
 import { useGames } from '@/context/GamesContext';
 import { DEFAULT_REGION } from '@/data/mock';
 import { filterCourtsByQuery } from '@/data/overpassCourts';
+import { useCourtAddresses } from '@/hooks/useCourtAddresses';
 import { useMapCourts } from '@/hooks/useMapCourts';
 import type { Court, Game } from '@/types';
 
@@ -48,10 +49,25 @@ export default function MapScreen() {
     onRegionChangeComplete,
   } = useMapCourts(DEFAULT_REGION);
 
-  const searchResults = useMemo(() => filterCourtsByQuery(courts, query), [courts, query]);
+  // Nominatim reverse-geocode for courts missing OSM addr:* (same system as old BallOut).
+  const { courtsWithAddresses } = useCourtAddresses(courts);
+
+  const searchResults = useMemo(
+    () => filterCourtsByQuery(courtsWithAddresses, query),
+    [courtsWithAddresses, query]
+  );
   const trimmedQuery = query.trim();
   const showSearchPanel = trimmedQuery.length > 0;
   const courtGames = selectedCourt ? getGamesForCourt(selectedCourt.id) : [];
+
+  // Keep sheet / Create Game address in sync as reverse-geocode resolves.
+  useEffect(() => {
+    if (!selectedCourt) return;
+    const updated = courtsWithAddresses.find((c) => c.id === selectedCourt.id);
+    if (updated && updated.address !== selectedCourt.address) {
+      setSelectedCourt(updated);
+    }
+  }, [courtsWithAddresses, selectedCourt]);
 
   useEffect(() => {
     let cancelled = false;
@@ -121,8 +137,14 @@ export default function MapScreen() {
     onRegionChangeComplete(region);
   }, [userCoord, onRegionChangeComplete]);
 
+  const resolveCourt = useCallback(
+    (court: Court): Court =>
+      courtsWithAddresses.find((c) => c.id === court.id) ?? court,
+    [courtsWithAddresses]
+  );
+
   const focusCourt = (court: Court) => {
-    setSelectedCourt(court);
+    setSelectedCourt(resolveCourt(court));
     mapRef.current?.animateToRegion(
       {
         latitude: court.latitude,
@@ -140,14 +162,15 @@ export default function MapScreen() {
       router.push('/(tabs)/create');
       return;
     }
+    const withAddress = resolveCourt(court);
     router.push({
       pathname: '/(tabs)/create',
       params: {
-        courtId: court.id,
-        courtName: court.name,
-        latitude: String(court.latitude),
-        longitude: String(court.longitude),
-        address: court.address,
+        courtId: withAddress.id,
+        courtName: withAddress.name,
+        latitude: String(withAddress.latitude),
+        longitude: String(withAddress.longitude),
+        address: withAddress.address,
       },
     });
   };
@@ -197,7 +220,7 @@ export default function MapScreen() {
               }
               pinColor={count > 0 ? Colors.accent : Colors.textMuted}
               tracksViewChanges={false}
-              onPress={() => setSelectedCourt(court)}
+              onPress={() => setSelectedCourt(resolveCourt(court))}
             />
           );
         })}

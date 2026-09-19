@@ -1,5 +1,5 @@
 import { router, useLocalSearchParams } from 'expo-router';
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -18,10 +18,20 @@ import { Stepper } from '@/components/ui/Stepper';
 import { BottomTabInset, Colors, FontSize, Radius, Spacing } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
 import { useGames } from '@/context/GamesContext';
+import { formatResolvedAddress, reverseGeocode } from '@/data/reverseGeocode';
+import {
+  ADDRESS_UNAVAILABLE,
+  FINDING_ADDRESS,
+} from '@/hooks/useCourtAddresses';
 import type { Court } from '@/types';
 
 const DATE_OPTIONS = ['Today', 'Tomorrow', 'This Weekend'] as const;
 const TIME_OPTIONS = ['4:00 PM', '5:00 PM', '6:00 PM', '7:00 PM', '8:00 PM', '9:00 PM'] as const;
+
+function paramString(value: string | string[] | undefined): string {
+  if (Array.isArray(value)) return value[0]?.trim() ?? '';
+  return value?.trim() ?? '';
+}
 
 export default function CreateGameScreen() {
   const params = useLocalSearchParams<{
@@ -34,20 +44,62 @@ export default function CreateGameScreen() {
   const { user } = useAuth();
   const { createGame } = useGames();
 
-  /** Real court from Map → Start Game (OSM id + coords). */
-  const selectedCourt: Court | null = useMemo(() => {
-    if (!params.courtId || !params.courtName) return null;
-    const lat = Number(params.latitude);
-    const lng = Number(params.longitude);
+  /** Real court from Map → Start Game (OSM id + coords + address from Overpass tags / reverse geocode). */
+  const selectedCourtFromParams: Court | null = useMemo(() => {
+    const courtId = paramString(params.courtId);
+    const courtName = paramString(params.courtName);
+    if (!courtId || !courtName) return null;
+    const lat = Number(paramString(params.latitude));
+    const lng = Number(paramString(params.longitude));
+    const address = paramString(params.address);
     return {
-      id: params.courtId,
-      name: params.courtName,
+      id: courtId,
+      name: courtName,
       latitude: Number.isFinite(lat) ? lat : 0,
       longitude: Number.isFinite(lng) ? lng : 0,
-      address: params.address || 'Address unavailable',
+      address: address || ADDRESS_UNAVAILABLE,
       activeGameIds: [],
     };
   }, [params.courtId, params.courtName, params.latitude, params.longitude, params.address]);
+
+  const [resolvedAddress, setResolvedAddress] = useState<string | null>(null);
+
+  // Finish reverse-geocode on Create if Map handed off before Nominatim returned.
+  useEffect(() => {
+    if (!selectedCourtFromParams) {
+      setResolvedAddress(null);
+      return;
+    }
+    const current = selectedCourtFromParams.address;
+    if (current !== ADDRESS_UNAVAILABLE && current !== FINDING_ADDRESS) {
+      setResolvedAddress(null);
+      return;
+    }
+
+    let cancelled = false;
+    setResolvedAddress(FINDING_ADDRESS);
+
+    (async () => {
+      const result = await reverseGeocode(
+        selectedCourtFromParams.latitude,
+        selectedCourtFromParams.longitude
+      );
+      if (cancelled) return;
+      setResolvedAddress(formatResolvedAddress(result) ?? ADDRESS_UNAVAILABLE);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedCourtFromParams]);
+
+  const selectedCourt: Court | null = useMemo(() => {
+    if (!selectedCourtFromParams) return null;
+    if (resolvedAddress) {
+      return { ...selectedCourtFromParams, address: resolvedAddress };
+    }
+    return selectedCourtFromParams;
+  }, [selectedCourtFromParams, resolvedAddress]);
 
   const [date, setDate] = useState<(typeof DATE_OPTIONS)[number]>('Today');
   const [time, setTime] = useState<(typeof TIME_OPTIONS)[number]>('6:00 PM');
