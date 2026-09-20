@@ -28,10 +28,13 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
   const [zoomedOut, setZoomedOut] = useState(false);
 
   const regionRef = useRef(_initialRegion);
+  const courtsRef = useRef<Court[]>([]);
   const loadingRef = useRef(false);
   const pendingRegionRef = useRef<Region | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  /** Monotonic id so only the latest in-flight search may update success/error UI. */
+  const searchIdRef = useRef(0);
 
   const runSearch = useCallback(async (region: Region) => {
     regionRef.current = region;
@@ -57,14 +60,20 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
 
     const cached = getCachedCourts(region);
     if (cached) {
+      courtsRef.current = cached;
       setCourts(cached);
       setError(null);
       return;
     }
 
+    const searchId = ++searchIdRef.current;
     loadingRef.current = true;
     setLoading(true);
-    setError(null);
+    // Clear error only when starting a fresh attempt with nothing on the map yet.
+    // Keep success UI if markers are already showing (avoids Retry flash from follow-ups).
+    if (courtsRef.current.length === 0) {
+      setError(null);
+    }
 
     abortRef.current?.abort();
     const controller = new AbortController();
@@ -75,17 +84,25 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
     loadingRef.current = false;
     setLoading(false);
 
-    if (controller.signal.aborted) {
+    // Stale / superseded / cancelled — do not overwrite a newer success.
+    if (searchId !== searchIdRef.current || controller.signal.aborted) {
       return;
     }
 
     if (result.ok) {
+      courtsRef.current = result.courts;
       setCourts(result.courts);
       setError(null);
     } else if (result.error !== 'Request cancelled.') {
-      setError(result.error);
-      if (__DEV__) {
-        console.log('[courts] soft failure — keeping existing markers', result.error);
+      // Soft failure: keep existing markers and success state. Only show Retry
+      // when we have nothing loaded yet (first load / empty map).
+      if (courtsRef.current.length === 0) {
+        setError(result.error);
+      } else if (__DEV__) {
+        console.log(
+          '[courts] soft failure — keeping existing markers and success UI',
+          result.error
+        );
       }
     }
 

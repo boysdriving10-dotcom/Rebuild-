@@ -2,13 +2,14 @@ import type { Region } from 'react-native-maps';
 
 import type { Court } from '@/types';
 
+/** Prefer lz4 first — primary overpass-api.de is often slow/504/429 under load. */
 const OVERPASS_ENDPOINTS = [
-  'https://overpass-api.de/api/interpreter',
   'https://lz4.overpass-api.de/api/interpreter',
+  'https://overpass-api.de/api/interpreter',
 ] as const;
 
-/** Client abort — Overpass query also sets [timeout:25]. */
-const REQUEST_TIMEOUT_MS = 15_000;
+/** Client abort — must exceed Overpass [timeout:25] so slow successes are not cut off. */
+const REQUEST_TIMEOUT_MS = 28_000;
 /** Extra attempts after the first (total attempts = 1 + MAX_RETRIES). */
 const MAX_RETRIES = 2;
 const RETRY_BASE_DELAY_MS = 800;
