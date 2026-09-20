@@ -290,7 +290,10 @@ export default function MapScreen() {
       {loading ? (
         <View style={styles.loadingPill} pointerEvents="none">
           <ActivityIndicator color={Colors.accent} size="small" />
-          <Text style={styles.loadingText}>Finding courts…</Text>
+          <View>
+            <Text style={styles.loadingText}>Loading nearby courts…</Text>
+            <Text style={styles.loadingSubtext}>This may take a few seconds.</Text>
+          </View>
         </View>
       ) : null}
 
@@ -459,6 +462,10 @@ const styles = StyleSheet.create({
     color: Colors.text,
     fontSize: FontSize.sm,
     fontWeight: '600',
+  },
+  loadingSubtext: {
+    color: Colors.textSecondary,
+    fontSize: FontSize.xs,
   },
   recenter: {
     alignItems: 'center',
