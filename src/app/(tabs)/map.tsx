@@ -287,6 +287,15 @@ export default function MapScreen() {
         </View>
       ) : null}
 
+      {!loading && !error && !zoomedOut && courts.length === 0 ? (
+        <View style={styles.hintBar}>
+          <View>
+            <Text style={styles.hintText}>No courts found nearby</Text>
+            <Text style={styles.hintSubtext}>Try moving the map to another area.</Text>
+          </View>
+        </View>
+      ) : null}
+
       {loading ? (
         <View style={styles.loadingPill} pointerEvents="none">
           <ActivityIndicator color={Colors.accent} size="small" />
@@ -412,6 +421,11 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
     fontSize: FontSize.sm,
     fontWeight: '600',
+  },
+  hintSubtext: {
+    color: Colors.textSecondary,
+    fontSize: FontSize.xs,
+    marginTop: 2,
   },
   errorBar: {
     alignItems: 'center',
