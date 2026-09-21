@@ -13,7 +13,6 @@ import {
 
 import { Button } from '@/components/ui/Button';
 import { Screen } from '@/components/ui/Screen';
-import { SegmentedControl } from '@/components/ui/SegmentedControl';
 import { Stepper } from '@/components/ui/Stepper';
 import { BottomTabInset, Colors, FontSize, Radius, Spacing } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
@@ -104,7 +103,6 @@ export default function CreateGameScreen() {
   const [date, setDate] = useState<(typeof DATE_OPTIONS)[number]>('Today');
   const [time, setTime] = useState<(typeof TIME_OPTIONS)[number]>('6:00 PM');
   const [maxPlayers, setMaxPlayers] = useState(10);
-  const [visibility, setVisibility] = useState<'public' | 'private'>('public');
 
   const onCreate = () => {
     if (!user) {
@@ -126,7 +124,7 @@ export default function CreateGameScreen() {
         date,
         time,
         maxPlayers,
-        isPublic: visibility === 'public',
+        isPublic: true,
       },
       { id: user.id, username: user.username }
     );
@@ -138,9 +136,7 @@ export default function CreateGameScreen() {
 
     Alert.alert(
       'Game Created',
-      `${selectedCourt.name}\n${date} · ${time}\n${maxPlayers} max · ${
-        visibility === 'public' ? 'Public' : 'Private'
-      }`,
+      `${selectedCourt.name}\n${date} · ${time}\n${maxPlayers} max`,
       [
         {
           text: 'Nice',
@@ -222,17 +218,6 @@ export default function CreateGameScreen() {
 
           <Field label="Max Players">
             <Stepper value={maxPlayers} min={2} max={20} onChange={setMaxPlayers} />
-          </Field>
-
-          <Field label="Visibility">
-            <SegmentedControl
-              value={visibility}
-              onChange={setVisibility}
-              options={[
-                { label: 'Public', value: 'public' },
-                { label: 'Private', value: 'private' },
-              ]}
-            />
           </Field>
 
           <Button
