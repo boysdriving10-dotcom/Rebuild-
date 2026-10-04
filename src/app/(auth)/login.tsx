@@ -25,8 +25,8 @@ export default function LoginScreen() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | undefined>();
 
-  const onSubmit = () => {
-    const result = login(email, password);
+  const onSubmit = async () => {
+    const result = await login(email, password);
     if (!result.ok) {
       setError(result.error);
     }

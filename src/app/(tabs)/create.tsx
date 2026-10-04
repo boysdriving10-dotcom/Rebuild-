@@ -104,7 +104,7 @@ export default function CreateGameScreen() {
   const [time, setTime] = useState<(typeof TIME_OPTIONS)[number]>('6:00 PM');
   const [maxPlayers, setMaxPlayers] = useState(10);
 
-  const onCreate = () => {
+  const onCreate = async () => {
     if (!user) {
       Alert.alert('Not logged in', 'Log in to create a game.');
       return;
@@ -114,7 +114,7 @@ export default function CreateGameScreen() {
       return;
     }
 
-    const result = createGame(
+    const result = await createGame(
       {
         courtId: selectedCourt.id,
         courtName: selectedCourt.name,

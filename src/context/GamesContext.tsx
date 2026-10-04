@@ -1,12 +1,26 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react';
 
+import { createGameInDatabase, fetchPublicGames } from '@/services/gamesApi';
 import type { CreateGameInput, Game } from '@/types';
 
 type ActionResult = { ok: true; game: Game } | { ok: false; error: string };
 
 type GamesContextValue = {
   games: Game[];
-  createGame: (input: CreateGameInput, host: { id: string; username: string }) => ActionResult;
+  /** True while the initial Supabase games fetch is in progress. */
+  isLoading: boolean;
+  createGame: (
+    input: CreateGameInput,
+    host: { id: string; username: string }
+  ) => Promise<ActionResult>;
   joinGame: (gameId: string, userId: string) => ActionResult;
   leaveGame: (gameId: string, userId: string) => ActionResult;
   removeUserData: (userId: string) => void;
@@ -14,50 +28,67 @@ type GamesContextValue = {
   isJoined: (gameId: string, userId: string) => boolean;
   countHosted: (userId: string) => number;
   countJoined: (userId: string) => number;
+  refreshGames: () => Promise<void>;
 };
 
 const GamesContext = createContext<GamesContextValue | null>(null);
 
-function makeGameId() {
-  return `game-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 export function GamesProvider({ children }: { children: ReactNode }) {
   const [games, setGames] = useState<Game[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  const refreshGames = useCallback(async () => {
+    const result = await fetchPublicGames();
+    if (result.ok) {
+      setGames(result.data);
+    } else if (__DEV__) {
+      console.warn('[games] fetchPublicGames failed:', result.error);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      setIsLoading(true);
+      const result = await fetchPublicGames();
+      if (cancelled) return;
+      if (result.ok) {
+        setGames(result.data);
+      } else if (__DEV__) {
+        console.warn('[games] initial fetch failed:', result.error);
+      }
+      setIsLoading(false);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const createGame = useCallback(
-    (input: CreateGameInput, host: { id: string; username: string }): ActionResult => {
-      if (!input.courtId || !input.courtName) {
-        return { ok: false, error: 'Pick a court for your game.' };
-      }
-      if (!host.id) {
-        return { ok: false, error: 'You must be logged in to create a game.' };
+    async (
+      input: CreateGameInput,
+      _host: { id: string; username: string }
+    ): Promise<ActionResult> => {
+      // host_id is taken from the authenticated Supabase session inside the API —
+      // the client-supplied host id is ignored for the database write.
+      const result = await createGameInDatabase(input);
+      if (!result.ok) {
+        return { ok: false, error: result.error };
       }
 
-      const game: Game = {
-        id: makeGameId(),
-        courtId: input.courtId,
-        courtName: input.courtName,
-        courtLatitude: input.courtLatitude,
-        courtLongitude: input.courtLongitude,
-        courtAddress: input.courtAddress || 'Address unavailable',
-        distance: 'Nearby',
-        time: input.time,
-        date: input.date,
-        currentPlayers: 1,
-        maxPlayers: input.maxPlayers,
-        isPublic: input.isPublic,
-        hostId: host.id,
-        hostUsername: host.username,
-        playerIds: [host.id],
-      };
+      setGames((prev) => {
+        const withoutDup = prev.filter((g) => g.id !== result.data.id);
+        return [result.data, ...withoutDup];
+      });
 
-      setGames((prev) => [game, ...prev]);
-      return { ok: true, game };
+      return { ok: true, game: result.data };
     },
     []
   );
 
+  // Join/leave stay local-only until game_players + secure RPCs are added.
   const joinGame = useCallback((gameId: string, userId: string): ActionResult => {
     const current = games.find((g) => g.id === gameId);
     if (!current) return { ok: false, error: 'Game not found.' };
@@ -136,6 +167,7 @@ export function GamesProvider({ children }: { children: ReactNode }) {
   const value = useMemo(
     () => ({
       games,
+      isLoading,
       createGame,
       joinGame,
       leaveGame,
@@ -144,9 +176,11 @@ export function GamesProvider({ children }: { children: ReactNode }) {
       isJoined,
       countHosted,
       countJoined,
+      refreshGames,
     }),
     [
       games,
+      isLoading,
       createGame,
       joinGame,
       leaveGame,
@@ -155,6 +189,7 @@ export function GamesProvider({ children }: { children: ReactNode }) {
       isJoined,
       countHosted,
       countJoined,
+      refreshGames,
     ]
   );
 

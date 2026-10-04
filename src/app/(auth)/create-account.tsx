@@ -29,8 +29,8 @@ export default function CreateAccountScreen() {
 
   const clearError = () => setError(undefined);
 
-  const onSubmit = () => {
-    const result = createAccount({ username, email, password, confirmPassword });
+  const onSubmit = async () => {
+    const result = await createAccount({ username, email, password, confirmPassword });
     if (!result.ok) {
       setError(result.error);
     }

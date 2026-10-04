@@ -1,6 +1,7 @@
-import { useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import { Alert, FlatList, Image, StyleSheet, Text, View } from 'react-native';
 import { router } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 
 import { GameCard } from '@/components/ui/GameCard';
 import { Screen } from '@/components/ui/Screen';
@@ -14,7 +15,13 @@ const logo = require('../../../assets/images/ballout-logo.png');
 
 export default function HomeScreen() {
   const { user } = useAuth();
-  const { games, joinGame, leaveGame, isJoined } = useGames();
+  const { games, joinGame, leaveGame, isJoined, refreshGames } = useGames();
+
+  useFocusEffect(
+    useCallback(() => {
+      void refreshGames();
+    }, [refreshGames])
+  );
 
   const myGames = useMemo(() => {
     if (!user) return [];
