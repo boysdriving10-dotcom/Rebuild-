@@ -65,6 +65,7 @@
     },
     "extra": {
       "router": {},
+      "EXPO_ROUTER_DISABLE_RN_NAVIGATION_CHECK": "1",
       "eas": {
         "projectId": "913aea33-cf9e-4a2e-8b80-a355fc0539ab"
       }
