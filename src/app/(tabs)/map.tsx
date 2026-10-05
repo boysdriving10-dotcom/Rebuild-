@@ -175,9 +175,9 @@ export default function MapScreen() {
     });
   };
 
-  const handleJoinGame = (game: Game) => {
+  const handleJoinGame = async (game: Game) => {
     if (!user) return;
-    const result = joinGame(game.id, user.id);
+    const result = await joinGame(game.id, user.id);
     if (!result.ok) {
       Alert.alert('Couldn’t join', result.error);
       return;

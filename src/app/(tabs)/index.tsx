@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Alert, FlatList, Image, StyleSheet, Text, View } from 'react-native';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
@@ -15,7 +15,8 @@ const logo = require('../../../assets/images/ballout-logo.png');
 
 export default function HomeScreen() {
   const { user } = useAuth();
-  const { games, joinGame, leaveGame, isJoined, refreshGames } = useGames();
+  const { games, joinGame, leaveGame, cancelGame, isJoined, refreshGames } = useGames();
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
 
   useFocusEffect(
     useCallback(() => {
@@ -36,14 +37,39 @@ export default function HomeScreen() {
     return games.filter((g) => !myIds.has(g.id));
   }, [games, myGames, user]);
 
-  const handleJoin = (game: Game) => {
+  const handleJoin = async (game: Game) => {
     if (!user) return;
-    const result = joinGame(game.id, user.id);
+    const result = await joinGame(game.id, user.id);
     if (!result.ok) {
       Alert.alert('Couldn’t join', result.error);
       return;
     }
     Alert.alert('Joined Game', `You're in for ${game.courtName} at ${game.time}.`);
+  };
+
+  const handleCancel = (game: Game) => {
+    if (!user || game.hostId !== user.id) return;
+    Alert.alert(
+      'Cancel Game',
+      'This game will be removed from the active feed and no one else will be able to join.',
+      [
+        { text: 'Keep Game', style: 'cancel' },
+        {
+          text: 'Cancel Game',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              setCancellingId(game.id);
+              const result = await cancelGame(game.id, user.id);
+              setCancellingId(null);
+              if (!result.ok) {
+                Alert.alert('Couldn’t cancel', result.error);
+              }
+            })();
+          },
+        },
+      ]
+    );
   };
 
   const handleLeave = (game: Game) => {
@@ -109,6 +135,8 @@ export default function HomeScreen() {
                     onLeave={handleLeave}
                     onDirections={handleDirections}
                     onViewCourt={handleViewCourt}
+                    onCancel={user && game.hostId === user.id ? handleCancel : undefined}
+                    cancelling={cancellingId === game.id}
                   />
                 </View>
               ))

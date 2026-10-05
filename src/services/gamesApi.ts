@@ -151,3 +151,58 @@ export async function fetchPublicGames(): Promise<GamesApiResult<Game[]>> {
   const games = (data as GameRow[] | null)?.map(mapGameRowToGame) ?? [];
   return { ok: true, data: games };
 }
+
+/** Host-only. Keeps the row and marks it cancelled so it drops out of active feeds. */
+export async function cancelGameInDatabase(gameId: string): Promise<GamesApiResult<null>> {
+  if (!isSupabaseConfigured) {
+    return {
+      ok: false,
+      error: 'Games are not configured. Add your Supabase URL and anon key to the .env file.',
+    };
+  }
+
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    return { ok: false, error: 'You must be logged in to cancel a game.' };
+  }
+
+  const { data, error } = await supabase
+    .from('games')
+    .update({ status: 'cancelled' })
+    .eq('id', gameId)
+    .eq('host_id', user.id)
+    .select('id')
+    .maybeSingle();
+
+  if (error) {
+    return { ok: false, error: friendlyGamesError(error.message) };
+  }
+  if (!data) {
+    return { ok: false, error: 'Only the host can cancel this game.' };
+  }
+
+  return { ok: true, data: null };
+}
+
+/** Used before join so a cancelled game cannot be joined from a stale list. */
+export async function fetchGameStatus(gameId: string): Promise<GamesApiResult<string | null>> {
+  if (!isSupabaseConfigured) {
+    return { ok: false, error: 'Games are not configured.' };
+  }
+
+  const { data, error } = await supabase
+    .from('games')
+    .select('status')
+    .eq('id', gameId)
+    .maybeSingle();
+
+  if (error) {
+    return { ok: false, error: friendlyGamesError(error.message) };
+  }
+
+  return { ok: true, data: (data?.status as string | undefined) ?? null };
+}

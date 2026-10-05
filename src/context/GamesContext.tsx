@@ -8,7 +8,12 @@ import {
   type ReactNode,
 } from 'react';
 
-import { createGameInDatabase, fetchPublicGames } from '@/services/gamesApi';
+import {
+  cancelGameInDatabase,
+  createGameInDatabase,
+  fetchGameStatus,
+  fetchPublicGames,
+} from '@/services/gamesApi';
 import type { CreateGameInput, Game } from '@/types';
 
 type ActionResult = { ok: true; game: Game } | { ok: false; error: string };
@@ -21,8 +26,9 @@ type GamesContextValue = {
     input: CreateGameInput,
     host: { id: string; username: string }
   ) => Promise<ActionResult>;
-  joinGame: (gameId: string, userId: string) => ActionResult;
+  joinGame: (gameId: string, userId: string) => Promise<ActionResult>;
   leaveGame: (gameId: string, userId: string) => ActionResult;
+  cancelGame: (gameId: string, userId: string) => Promise<ActionResult>;
   removeUserData: (userId: string) => void;
   getGamesForCourt: (courtId: string) => Game[];
   isJoined: (gameId: string, userId: string) => boolean;
@@ -88,10 +94,35 @@ export function GamesProvider({ children }: { children: ReactNode }) {
     []
   );
 
+  const cancelGame = useCallback(
+    async (gameId: string, userId: string): Promise<ActionResult> => {
+      const current = games.find((g) => g.id === gameId);
+      if (!current) return { ok: false, error: 'Game not found.' };
+      if (current.hostId !== userId) {
+        return { ok: false, error: 'Only the host can cancel this game.' };
+      }
+
+      const result = await cancelGameInDatabase(gameId);
+      if (!result.ok) return result;
+
+      setGames((prev) => prev.filter((g) => g.id !== gameId));
+      return { ok: true, game: current };
+    },
+    [games]
+  );
+
   // Join/leave stay local-only until game_players + secure RPCs are added.
-  const joinGame = useCallback((gameId: string, userId: string): ActionResult => {
+  const joinGame = useCallback(async (gameId: string, userId: string): Promise<ActionResult> => {
     const current = games.find((g) => g.id === gameId);
     if (!current) return { ok: false, error: 'Game not found.' };
+
+    const statusResult = await fetchGameStatus(gameId);
+    if (!statusResult.ok) return statusResult;
+    if (statusResult.data !== 'open' && statusResult.data !== 'full') {
+      setGames((prev) => prev.filter((g) => g.id !== gameId));
+      return { ok: false, error: 'This game is no longer available.' };
+    }
+
     if (current.playerIds.includes(userId)) {
       return { ok: false, error: 'You already joined this game.' };
     }
@@ -171,6 +202,7 @@ export function GamesProvider({ children }: { children: ReactNode }) {
       createGame,
       joinGame,
       leaveGame,
+      cancelGame,
       removeUserData,
       getGamesForCourt,
       isJoined,
@@ -184,6 +216,7 @@ export function GamesProvider({ children }: { children: ReactNode }) {
       createGame,
       joinGame,
       leaveGame,
+      cancelGame,
       removeUserData,
       getGamesForCourt,
       isJoined,

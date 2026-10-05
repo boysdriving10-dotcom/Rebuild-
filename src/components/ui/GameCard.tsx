@@ -10,6 +10,9 @@ type GameCardProps = {
   onJoin: (game: Game) => void;
   onLeave: (game: Game) => void;
   onDirections: (game: Game) => void;
+  /** Shown only for the host. */
+  onCancel?: (game: Game) => void;
+  cancelling?: boolean;
   /** When set, shows a View Court action (used by My Games). */
   onViewCourt?: (game: Game) => void;
   /** My Games layout: Directions, View Court, Leave — no Join. */
@@ -22,6 +25,8 @@ export function GameCard({
   onJoin,
   onLeave,
   onDirections,
+  onCancel,
+  cancelling = false,
   onViewCourt,
   mode = 'nearby',
 }: GameCardProps) {
@@ -56,6 +61,14 @@ export function GameCard({
           <Button title="Get Directions" variant="outline" onPress={() => onDirections(game)} />
           {onViewCourt ? (
             <Button title="View Court" variant="secondary" onPress={() => onViewCourt(game)} />
+          ) : null}
+          {onCancel ? (
+            <Button
+              title={cancelling ? 'Cancelling…' : 'Cancel Game'}
+              variant="secondary"
+              disabled={cancelling}
+              onPress={() => onCancel(game)}
+            />
           ) : null}
           {joined ? (
             <Button title="Leave Game" variant="secondary" onPress={() => onLeave(game)} />
