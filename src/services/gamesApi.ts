@@ -171,19 +171,16 @@ export async function cancelGameInDatabase(gameId: string): Promise<GamesApiResu
     return { ok: false, error: 'You must be logged in to cancel a game.' };
   }
 
-  const { data, error } = await supabase
+  // Do not .select() the updated row. A cancelled game is hidden by the
+  // feed SELECT policy, so an empty read is not proof the update failed.
+  const { error } = await supabase
     .from('games')
     .update({ status: 'cancelled' })
     .eq('id', gameId)
-    .eq('host_id', user.id)
-    .select('id')
-    .maybeSingle();
+    .eq('host_id', user.id);
 
   if (error) {
     return { ok: false, error: friendlyGamesError(error.message) };
-  }
-  if (!data) {
-    return { ok: false, error: 'Only the host can cancel this game.' };
   }
 
   return { ok: true, data: null };
