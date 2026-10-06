@@ -1,7 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import { Alert, FlatList, Image, StyleSheet, Text, View } from 'react-native';
-import { router } from 'expo-router';
-import { useFocusEffect } from '@react-navigation/native';
+import { router, useFocusEffect } from 'expo-router';
 
 import { GameCard } from '@/components/ui/GameCard';
 import { Screen } from '@/components/ui/Screen';
