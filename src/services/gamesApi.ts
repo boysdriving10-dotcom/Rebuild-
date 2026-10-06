@@ -39,6 +39,7 @@ export function mapGameRowToGame(row: GameRow): Game {
     isPublic: row.is_public,
     hostId: row.host_id,
     hostUsername: row.host_username,
+    status: row.status,
     // game_players not wired yet — host counts as the only known player.
     playerIds: [row.host_id],
   };

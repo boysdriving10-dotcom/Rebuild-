@@ -14,6 +14,7 @@ export type Game = {
   hostId: string;
   hostUsername: string;
   playerIds: string[];
+  status: string;
 };
 
 export type Court = {

@@ -26,7 +26,9 @@ export default function HomeScreen() {
   const myGames = useMemo(() => {
     if (!user) return [];
     return games.filter(
-      (g) => g.hostId === user.id || g.playerIds.includes(user.id)
+      (g) =>
+        (g.hostId === user.id || g.playerIds.includes(user.id)) &&
+        (g.status === 'open' || g.status === 'full')
     );
   }, [games, user]);
 
