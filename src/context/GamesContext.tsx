@@ -11,8 +11,9 @@ import {
 import {
   cancelGameInDatabase,
   createGameInDatabase,
-  fetchGameStatus,
   fetchPublicGames,
+  joinGameInDatabase,
+  leaveGameInDatabase,
 } from '@/services/gamesApi';
 import type { CreateGameInput, Game } from '@/types';
 
@@ -27,7 +28,7 @@ type GamesContextValue = {
     host: { id: string; username: string }
   ) => Promise<ActionResult>;
   joinGame: (gameId: string, userId: string) => Promise<ActionResult>;
-  leaveGame: (gameId: string, userId: string) => ActionResult;
+  leaveGame: (gameId: string, userId: string) => Promise<ActionResult>;
   cancelGame: (gameId: string, userId: string) => Promise<ActionResult>;
   removeUserData: (userId: string) => void;
   getGamesForCourt: (courtId: string) => Game[];
@@ -111,45 +112,45 @@ export function GamesProvider({ children }: { children: ReactNode }) {
     [games]
   );
 
-  // Join/leave stay local-only until game_players + secure RPCs are added.
-  const joinGame = useCallback(async (gameId: string, userId: string): Promise<ActionResult> => {
+  const joinGame = useCallback(async (gameId: string, _userId: string): Promise<ActionResult> => {
     const current = games.find((g) => g.id === gameId);
     if (!current) return { ok: false, error: 'Game not found.' };
 
-    const statusResult = await fetchGameStatus(gameId);
-    if (!statusResult.ok) return statusResult;
-    if (statusResult.data !== 'open' && statusResult.data !== 'full') {
-      setGames((prev) => prev.filter((g) => g.id !== gameId));
-      return { ok: false, error: 'This game is no longer available.' };
-    }
-
-    if (current.playerIds.includes(userId)) {
-      return { ok: false, error: 'You already joined this game.' };
-    }
-    if (current.currentPlayers >= current.maxPlayers) {
-      return { ok: false, error: 'This game is full.' };
+    const result = await joinGameInDatabase(gameId);
+    if (!result.ok) {
+      if (result.error === 'This game is no longer available.') {
+        setGames((prev) => prev.filter((g) => g.id !== gameId));
+      }
+      return result;
     }
 
     const updated: Game = {
       ...current,
-      playerIds: [...current.playerIds, userId],
-      currentPlayers: current.currentPlayers + 1,
+      currentPlayers: result.data.currentPlayers,
+      status: result.data.status,
+      playerIds: result.data.playerIds,
     };
     setGames((prev) => prev.map((g) => (g.id === gameId ? updated : g)));
     return { ok: true, game: updated };
   }, [games]);
 
-  const leaveGame = useCallback((gameId: string, userId: string): ActionResult => {
+  const leaveGame = useCallback(async (gameId: string, _userId: string): Promise<ActionResult> => {
     const current = games.find((g) => g.id === gameId);
     if (!current) return { ok: false, error: 'Game not found.' };
-    if (!current.playerIds.includes(userId)) {
-      return { ok: false, error: 'You are not in this game.' };
+
+    const result = await leaveGameInDatabase(gameId);
+    if (!result.ok) {
+      if (result.error === 'This game is no longer available.') {
+        setGames((prev) => prev.filter((g) => g.id !== gameId));
+      }
+      return result;
     }
 
     const updated: Game = {
       ...current,
-      playerIds: current.playerIds.filter((id) => id !== userId),
-      currentPlayers: Math.max(0, current.currentPlayers - 1),
+      currentPlayers: result.data.currentPlayers,
+      status: result.data.status,
+      playerIds: result.data.playerIds,
     };
     setGames((prev) => prev.map((g) => (g.id === gameId ? updated : g)));
     return { ok: true, game: updated };

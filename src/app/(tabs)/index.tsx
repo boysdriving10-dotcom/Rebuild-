@@ -20,6 +20,10 @@ export default function HomeScreen() {
   useFocusEffect(
     useCallback(() => {
       void refreshGames();
+      const intervalId = setInterval(() => {
+        void refreshGames();
+      }, 5000);
+      return () => clearInterval(intervalId);
     }, [refreshGames])
   );
 
@@ -73,9 +77,9 @@ export default function HomeScreen() {
     );
   };
 
-  const handleLeave = (game: Game) => {
+  const handleLeave = async (game: Game) => {
     if (!user) return;
-    const result = leaveGame(game.id, user.id);
+    const result = await leaveGame(game.id, user.id);
     if (!result.ok) {
       Alert.alert('Couldn’t leave', result.error);
     }

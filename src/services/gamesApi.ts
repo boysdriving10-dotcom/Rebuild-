@@ -20,6 +20,13 @@ type GameRow = {
   status: string;
   created_at?: string;
   updated_at?: string;
+  game_players?: { user_id: string }[] | null;
+};
+
+type MembershipUpdate = {
+  currentPlayers: number;
+  status: string;
+  playerIds: string[];
 };
 
 /** Map a public.games row to the app Game shape (distance is client-only). */
@@ -40,9 +47,30 @@ export function mapGameRowToGame(row: GameRow): Game {
     hostId: row.host_id,
     hostUsername: row.host_username,
     status: row.status,
-    // game_players not wired yet — host counts as the only known player.
-    playerIds: [row.host_id],
+    playerIds: playerIdsFromRow(row),
   };
+}
+
+function playerIdsFromRow(row: GameRow): string[] {
+  const ids = (row.game_players ?? [])
+    .map((player) => player.user_id)
+    .filter((id) => typeof id === 'string' && id.length > 0);
+  return ids.length > 0 ? ids : [row.host_id];
+}
+
+function parseMembershipUpdate(data: unknown): MembershipUpdate | null {
+  if (!data || typeof data !== 'object') return null;
+  const row = data as {
+    current_players?: unknown;
+    status?: unknown;
+    player_ids?: unknown;
+  };
+  const currentPlayers = Number(row.current_players);
+  if (!Number.isFinite(currentPlayers) || typeof row.status !== 'string' || !Array.isArray(row.player_ids)) {
+    return null;
+  }
+  const playerIds = row.player_ids.filter((id): id is string => typeof id === 'string' && id.length > 0);
+  return { currentPlayers, status: row.status, playerIds };
 }
 
 function friendlyGamesError(message: string): string {
@@ -138,7 +166,7 @@ export async function fetchPublicGames(): Promise<GamesApiResult<Game[]>> {
   const { data, error } = await supabase
     .from('games')
     .select(
-      'id, host_id, host_username, court_id, court_name, court_latitude, court_longitude, court_address, date, time, max_players, current_players, is_public, status, created_at, updated_at'
+      'id, host_id, host_username, court_id, court_name, court_latitude, court_longitude, court_address, date, time, max_players, current_players, is_public, status, created_at, updated_at, game_players(user_id)'
     )
     .eq('is_public', true)
     .in('status', ['open', 'full'])
@@ -186,21 +214,64 @@ export async function cancelGameInDatabase(gameId: string): Promise<GamesApiResu
   return { ok: true, data: null };
 }
 
-/** Used before join so a cancelled game cannot be joined from a stale list. */
-export async function fetchGameStatus(gameId: string): Promise<GamesApiResult<string | null>> {
+/** Persist a join. The database locks the game and updates the roster count. */
+export async function joinGameInDatabase(gameId: string): Promise<GamesApiResult<MembershipUpdate>> {
   if (!isSupabaseConfigured) {
-    return { ok: false, error: 'Games are not configured.' };
+    return {
+      ok: false,
+      error: 'Games are not configured. Add your Supabase URL and anon key to the .env file.',
+    };
   }
 
-  const { data, error } = await supabase
-    .from('games')
-    .select('status')
-    .eq('id', gameId)
-    .maybeSingle();
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
 
+  if (userError || !user) {
+    return { ok: false, error: 'You must be logged in to join a game.' };
+  }
+
+  const { data, error } = await supabase.rpc('join_game', { p_game_id: gameId });
   if (error) {
     return { ok: false, error: friendlyGamesError(error.message) };
   }
 
-  return { ok: true, data: (data?.status as string | undefined) ?? null };
+  const parsed = parseMembershipUpdate(data);
+  if (!parsed) {
+    return { ok: false, error: 'Something went wrong. Please try again.' };
+  }
+
+  return { ok: true, data: parsed };
+}
+
+/** Persist a leave. The database frees the spot and updates the roster count. */
+export async function leaveGameInDatabase(gameId: string): Promise<GamesApiResult<MembershipUpdate>> {
+  if (!isSupabaseConfigured) {
+    return {
+      ok: false,
+      error: 'Games are not configured. Add your Supabase URL and anon key to the .env file.',
+    };
+  }
+
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    return { ok: false, error: 'You must be logged in to leave a game.' };
+  }
+
+  const { data, error } = await supabase.rpc('leave_game', { p_game_id: gameId });
+  if (error) {
+    return { ok: false, error: friendlyGamesError(error.message) };
+  }
+
+  const parsed = parseMembershipUpdate(data);
+  if (!parsed) {
+    return { ok: false, error: 'Something went wrong. Please try again.' };
+  }
+
+  return { ok: true, data: parsed };
 }
