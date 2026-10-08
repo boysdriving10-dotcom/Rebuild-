@@ -3,6 +3,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import { Button } from '@/components/ui/Button';
 import { Colors, FontSize, Radius, Spacing } from '@/constants/theme';
 import type { Game } from '@/types';
+import { formatGameDateLabel } from '@/utils/gameDate';
 
 type GameCardProps = {
   game: Game;
@@ -32,28 +33,25 @@ export function GameCard({
 }: GameCardProps) {
   const spotsLeft = game.maxPlayers - game.currentPlayers;
   const full = spotsLeft <= 0;
+  const dateLabel = formatGameDateLabel(game.date);
 
   return (
     <View style={styles.card}>
-      <View style={styles.top}>
-        <View style={styles.titleBlock}>
-          <Text style={styles.courtName} numberOfLines={1}>
-            {game.courtName}
+      <View style={styles.titleBlock}>
+        <Text style={styles.courtName} numberOfLines={1}>
+          {game.courtName}
+        </Text>
+        {!!game.courtAddress && (
+          <Text style={styles.courtAddress} numberOfLines={2}>
+            {game.courtAddress}
           </Text>
-          <Text style={styles.distance}>{game.distance || 'Nearby'}</Text>
-        </View>
-        <View style={styles.badge}>
-          <Text style={styles.badgeText}>{game.date}</Text>
-        </View>
-      </View>
-
-      <View style={styles.metaRow}>
-        <MetaChip label="Time" value={game.time} />
-        <MetaChip
-          label="Players"
-          value={`${game.currentPlayers}/${game.maxPlayers}`}
-          highlight={spotsLeft <= 2 && !full}
-        />
+        )}
+        <Text style={styles.schedule}>
+          {dateLabel} • {game.time}
+        </Text>
+        <Text style={[styles.players, spotsLeft <= 2 && !full && styles.playersHot]}>
+          {game.currentPlayers}/{game.maxPlayers} players
+        </Text>
       </View>
 
       {mode === 'mine' ? (
@@ -90,23 +88,6 @@ export function GameCard({
   );
 }
 
-function MetaChip({
-  label,
-  value,
-  highlight,
-}: {
-  label: string;
-  value: string;
-  highlight?: boolean;
-}) {
-  return (
-    <View style={styles.chip}>
-      <Text style={styles.chipLabel}>{label}</Text>
-      <Text style={[styles.chipValue, highlight && styles.chipValueHot]}>{value}</Text>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   card: {
     backgroundColor: Colors.surfaceElevated,
@@ -116,14 +97,7 @@ const styles = StyleSheet.create({
     gap: Spacing.lg,
     padding: Spacing.lg,
   },
-  top: {
-    alignItems: 'flex-start',
-    flexDirection: 'row',
-    gap: Spacing.md,
-    justifyContent: 'space-between',
-  },
   titleBlock: {
-    flex: 1,
     gap: 4,
   },
   courtName: {
@@ -131,46 +105,23 @@ const styles = StyleSheet.create({
     fontSize: FontSize.lg,
     fontWeight: '700',
   },
-  distance: {
+  courtAddress: {
     color: Colors.textSecondary,
     fontSize: FontSize.sm,
     fontWeight: '500',
   },
-  badge: {
-    backgroundColor: Colors.accentSoft,
-    borderRadius: Radius.full,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.xs,
-  },
-  badgeText: {
-    color: Colors.accent,
-    fontSize: FontSize.xs,
-    fontWeight: '700',
-  },
-  metaRow: {
-    flexDirection: 'row',
-    gap: Spacing.sm,
-  },
-  chip: {
-    backgroundColor: Colors.surface,
-    borderRadius: Radius.md,
-    flex: 1,
-    gap: 2,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-  },
-  chipLabel: {
-    color: Colors.textMuted,
-    fontSize: FontSize.xs,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-  },
-  chipValue: {
+  schedule: {
     color: Colors.text,
     fontSize: FontSize.md,
     fontWeight: '600',
+    marginTop: 4,
   },
-  chipValueHot: {
+  players: {
+    color: Colors.textSecondary,
+    fontSize: FontSize.sm,
+    fontWeight: '500',
+  },
+  playersHot: {
     color: Colors.accent,
   },
   actions: {

@@ -23,6 +23,7 @@ import {
   FINDING_ADDRESS,
 } from '@/hooks/useCourtAddresses';
 import type { Court } from '@/types';
+import { scheduledDateFromOption } from '@/utils/gameDate';
 
 const DATE_OPTIONS = ['Today', 'Tomorrow', 'This Weekend'] as const;
 const TIME_OPTIONS = ['4:00 PM', '5:00 PM', '6:00 PM', '7:00 PM', '8:00 PM', '9:00 PM'] as const;
@@ -114,6 +115,7 @@ export default function CreateGameScreen() {
       return;
     }
 
+    // Persist a real calendar date; relative labels are computed at display time.
     const result = await createGame(
       {
         courtId: selectedCourt.id,
@@ -121,7 +123,7 @@ export default function CreateGameScreen() {
         courtLatitude: selectedCourt.latitude,
         courtLongitude: selectedCourt.longitude,
         courtAddress: selectedCourt.address,
-        date,
+        date: scheduledDateFromOption(date),
         time,
         maxPlayers,
         isPublic: true,
