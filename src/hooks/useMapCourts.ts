@@ -1,14 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Region } from 'react-native-maps';
 
+import { getFallbackCourtsInBBox } from '@/data/fallbackCourts';
 import {
+  dedupeCourts,
   fetchCourtsInRegion,
   getBoundsCacheKey,
   getCachedCourts,
   isRegionTooZoomedOut,
   regionToBBox,
+  type BBox,
 } from '@/data/overpassCourts';
 import type { Court } from '@/types';
+
+function courtsInBBox(courts: Court[], bbox: BBox): Court[] {
+  return courts.filter(
+    (c) =>
+      c.latitude >= bbox.south &&
+      c.latitude <= bbox.north &&
+      c.longitude >= bbox.west &&
+      c.longitude <= bbox.east
+  );
+}
 
 const DEBOUNCE_MS = 500;
 
@@ -20,6 +33,21 @@ export type MapCourtsState = {
   retry: () => void;
   onRegionChangeComplete: (region: Region) => void;
 };
+
+/**
+ * Merge live/cached courts with verified fallbacks for the visible bbox.
+ * Used on Overpass failure and on empty Overpass success so the map is not blank.
+ */
+export function mergeCourtsWithFallback(
+  existing: Court[],
+  live: Court[],
+  bbox: BBox
+): Court[] {
+  const inBoundsExisting = courtsInBBox(existing, bbox);
+  const inBoundsLive = courtsInBBox(live, bbox);
+  const fallback = getFallbackCourtsInBBox(bbox);
+  return dedupeCourts([...inBoundsLive, ...inBoundsExisting, ...fallback]);
+}
 
 export function useMapCourts(_initialRegion: Region): MapCourtsState {
   const [courts, setCourts] = useState<Court[]>([]);
@@ -36,7 +64,7 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
   /** Monotonic id so only the latest in-flight search may update success/error UI. */
   const searchIdRef = useRef(0);
 
-  const runSearch = useCallback(async (region: Region) => {
+  const runSearch = useCallback(async (region: Region, opts?: { force?: boolean }) => {
     regionRef.current = region;
 
     if (isRegionTooZoomedOut(region)) {
@@ -79,7 +107,10 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
     const controller = new AbortController();
     abortRef.current = controller;
 
-    const result = await fetchCourtsInRegion(region, { signal: controller.signal });
+    const result = await fetchCourtsInRegion(region, {
+      signal: controller.signal,
+      force: opts?.force,
+    });
 
     loadingRef.current = false;
     setLoading(false);
@@ -89,20 +120,34 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
       return;
     }
 
+    const bbox = regionToBBox(region);
+
     if (result.ok) {
-      courtsRef.current = result.courts;
-      setCourts(result.courts);
+      // Always union live results with verified in-bounds fallbacks (deduped).
+      // Volpa has no OSM pitch — fallback is the only way it appears.
+      const next = mergeCourtsWithFallback(courtsRef.current, result.courts, bbox);
+      courtsRef.current = next;
+      setCourts(next);
       setError(null);
     } else if (result.error !== 'Request cancelled.') {
-      // Soft failure: keep existing markers and success state. Only show Retry
-      // when we have nothing loaded yet (first load / empty map).
-      if (courtsRef.current.length === 0) {
+      // Soft failure: keep in-bounds pins + verified fallback for these bounds.
+      const next = mergeCourtsWithFallback(courtsRef.current, [], bbox);
+
+      if (next.length > 0) {
+        courtsRef.current = next;
+        setCourts(next);
+        setError(null);
+        if (__DEV__) {
+          console.log('[courts] Overpass failed — showing in-bounds courts', {
+            count: next.length,
+            error: result.error,
+          });
+        }
+      } else {
+        // Nothing valid for this viewport — drop stale out-of-area pins.
+        courtsRef.current = [];
+        setCourts([]);
         setError(result.error);
-      } else if (__DEV__) {
-        console.log(
-          '[courts] soft failure — keeping existing markers and success UI',
-          result.error
-        );
       }
     }
 
@@ -138,7 +183,8 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
   );
 
   const retry = useCallback(() => {
-    void runSearch(regionRef.current);
+    // Deliberate Retry: bypass Overpass cooldown for one network attempt.
+    void runSearch(regionRef.current, { force: true });
   }, [runSearch]);
 
   useEffect(() => {

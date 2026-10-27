@@ -12,6 +12,13 @@ const REQUEST_TIMEOUT_MS = 15_000;
 /** Extra attempts after the first (total attempts = 1 + MAX_RETRIES). */
 const MAX_RETRIES = 2;
 const RETRY_BASE_DELAY_MS = 800;
+/** After a failed Overpass sequence, skip network calls for this long (pans still get fallback). */
+const OVERPASS_COOLDOWN_MS = 45_000;
+const OVERPASS_BUSY_ERROR =
+  'Court service is busy. Tap retry or pan the map to try again.';
+
+/** Epoch ms until which automatic Overpass fetches are skipped. */
+let overpassCooldownUntil = 0;
 
 /** Skip Overpass when the viewport is wider than this (degrees of latitude). */
 export const MAX_SEARCH_LATITUDE_DELTA = 0.8;
@@ -382,13 +389,33 @@ async function fetchOnce(
 }
 
 /**
+ * Whether the retry loop should continue after a failed attempt.
+ * Exported for unit tests — keep in sync with fetchCourtsInRegion.
+ */
+export function shouldContinueAfterFailure(options: {
+  retryable: boolean;
+  cancelled: boolean;
+  attemptIndex: number;
+  endpointCount: number;
+}): boolean {
+  if (options.cancelled) return false;
+  if (options.retryable) return true;
+  // Non-retryable (e.g. 406): still try each configured endpoint once.
+  return options.attemptIndex + 1 < options.endpointCount;
+}
+
+/**
  * Fetch courts for the visible region.
  * Uses in-memory bbox cache, client timeout, and retries with backoff on
- * timeouts / 429 / 5xx (rotates Overpass endpoints).
+ * timeouts / 429 / 5xx (rotates Overpass endpoints). Non-retryable HTTP errors
+ * (e.g. 406) still rotate once through each configured endpoint before stopping.
+ * After a failed sequence, a short cooldown skips network calls so map pans
+ * do not hammer an overloaded Overpass; pass `force: true` to bypass once (Retry).
+ * Empty Overpass successes are returned but not cached, so fallback can still apply.
  */
 export async function fetchCourtsInRegion(
   region: Region,
-  options?: { signal?: AbortSignal }
+  options?: { signal?: AbortSignal; force?: boolean }
 ): Promise<FetchCourtsResult> {
   if (isRegionTooZoomedOut(region)) {
     return { ok: true, courts: [], fromCache: false };
@@ -405,13 +432,24 @@ export async function fetchCourtsInRegion(
     return { ok: true, courts: cached, fromCache: true };
   }
 
+  const now = Date.now();
+  if (!options?.force && now < overpassCooldownUntil) {
+    if (__DEV__) {
+      console.log('[courts] Overpass cooldown active — skipping network', {
+        remainingMs: overpassCooldownUntil - now,
+      });
+    }
+    // Failure (not cancel) so useMapCourts can still apply in-bounds fallback.
+    return { ok: false, error: OVERPASS_BUSY_ERROR };
+  }
+
   const bbox = regionToBBox(region);
   const query = buildOverpassQuery(bbox);
   const startedAt = Date.now();
   let lastError = 'Could not load courts. Check your connection and try again.';
 
   if (__DEV__) {
-    console.log('[courts] search started', { bbox });
+    console.log('[courts] search started', { bbox, force: !!options?.force });
   }
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -431,7 +469,11 @@ export async function fetchCourtsInRegion(
     const result = await fetchOnce(endpoint, query, options?.signal);
 
     if (result.ok) {
-      setCachedCourts(region, result.courts);
+      overpassCooldownUntil = 0;
+      // Do not cache empty lists — keeps fallback available on the next pass.
+      if (result.courts.length > 0) {
+        setCachedCourts(region, result.courts);
+      }
       if (__DEV__) {
         console.log('[courts] request success', {
           durationMs: Date.now() - startedAt,
@@ -454,12 +496,42 @@ export async function fetchCourtsInRegion(
       });
     }
 
-    if (!result.retryable) {
+    const cancelled =
+      result.error === 'Request cancelled.' || !!options?.signal?.aborted;
+    if (cancelled) {
+      return { ok: false, error: 'Request cancelled.' };
+    }
+
+    if (
+      !shouldContinueAfterFailure({
+        retryable: result.retryable,
+        cancelled: false,
+        attemptIndex: attempt,
+        endpointCount: OVERPASS_ENDPOINTS.length,
+      })
+    ) {
       break;
     }
   }
 
+  // Do not cool down on cancel — only after a real exhausted failure sequence.
+  if (lastError !== 'Request cancelled.') {
+    overpassCooldownUntil = Date.now() + OVERPASS_COOLDOWN_MS;
+    if (__DEV__) {
+      console.log('[courts] Overpass cooldown started', {
+        cooldownMs: OVERPASS_COOLDOWN_MS,
+        error: lastError,
+      });
+    }
+  }
+
   return { ok: false, error: lastError };
+}
+
+/** Test-only: clear in-memory cache + cooldown between cases. */
+export function __resetOverpassCourtsTestState(): void {
+  courtsCache.clear();
+  overpassCooldownUntil = 0;
 }
 
 /** Street-suffix tokens ignored so "66 Aberdeen Dr" can match "Aberdeen". */
