@@ -88,8 +88,11 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
 
     const cached = getCachedCourts(region);
     if (cached) {
-      courtsRef.current = cached;
-      setCourts(cached);
+      // Cache holds live Overpass results only — merge once as `live`, not as both args.
+      const bbox = regionToBBox(region);
+      const next = mergeCourtsWithFallback([], cached, bbox);
+      courtsRef.current = next;
+      setCourts(next);
       setError(null);
       return;
     }
