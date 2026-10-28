@@ -9,6 +9,7 @@ import {
   getCachedCourts,
   isRegionTooZoomedOut,
   regionToBBox,
+  withCourtLoadDiag,
   type BBox,
 } from '@/data/overpassCourts';
 import type { Court } from '@/types';
@@ -126,13 +127,24 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
 
     const bbox = regionToBBox(region);
 
+    const showDiag = !!opts?.force;
+
     if (result.ok) {
       // Always union live results with verified in-bounds fallbacks (deduped).
       // Volpa has no OSM pitch — fallback is the only way it appears.
       const next = mergeCourtsWithFallback(courtsRef.current, result.courts, bbox);
       courtsRef.current = next;
       setCourts(next);
-      setError(null);
+      if (next.length > 0) {
+        setError(null);
+      } else if (showDiag && result.emptyDiag) {
+        // Retry got HTTP 200 with no usable courts and no in-bounds fallbacks.
+        setError(
+          withCourtLoadDiag('No courts found nearby', result.emptyDiag)
+        );
+      } else {
+        setError(null);
+      }
     } else if (result.error !== 'Request cancelled.') {
       // Soft failure: keep in-bounds pins + verified fallback for these bounds.
       const next = mergeCourtsWithFallback(courtsRef.current, [], bbox);
@@ -145,13 +157,17 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
           console.log('[courts] Overpass failed — showing in-bounds courts', {
             count: next.length,
             error: result.error,
+            diag: result.diag,
           });
         }
       } else {
         // Nothing valid for this viewport — drop stale out-of-area pins.
         courtsRef.current = [];
         setCourts([]);
-        setError(result.error);
+        // Production/TestFlight: attach safe diag only after an explicit Retry.
+        setError(
+          showDiag ? withCourtLoadDiag(result.error, result.diag) : result.error
+        );
       }
     }
 

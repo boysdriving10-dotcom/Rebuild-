@@ -241,3 +241,85 @@ test('simulated cancel stops before second host', () => {
   }
   assert.deepEqual(attempts, ['overpass']);
 });
+
+function formatCourtLoadDiag({ host, category, status }) {
+  if (category === 'http' && status != null) return `HTTP ${status}@${host}`;
+  if (category === 'timeout') return `timeout@${host}`;
+  if (category === 'network') return `network@${host}`;
+  if (category === 'invalid_json') return `invalid_json@${host}`;
+  return `empty@${host}`;
+}
+
+function withCourtLoadDiag(message, diag) {
+  if (!diag) return message;
+  return `${message} [${diag}]`;
+}
+
+function overpassHostLabel(endpoint) {
+  return endpoint.includes('lz4.') ? 'lz4' : 'overpass';
+}
+
+test('diag tags cover http/timeout/network/invalid_json/empty without secrets', () => {
+  assert.equal(
+    formatCourtLoadDiag({ host: 'lz4', category: 'http', status: 406 }),
+    'HTTP 406@lz4'
+  );
+  assert.equal(
+    formatCourtLoadDiag({ host: 'overpass', category: 'timeout' }),
+    'timeout@overpass'
+  );
+  assert.equal(
+    formatCourtLoadDiag({ host: 'overpass', category: 'network' }),
+    'network@overpass'
+  );
+  assert.equal(
+    formatCourtLoadDiag({ host: 'lz4', category: 'invalid_json' }),
+    'invalid_json@lz4'
+  );
+  assert.equal(
+    formatCourtLoadDiag({ host: 'overpass', category: 'empty' }),
+    'empty@overpass'
+  );
+  const tagged = withCourtLoadDiag(
+    'Could not load courts. Check your connection and try again.',
+    'HTTP 406@lz4'
+  );
+  assert.equal(
+    tagged,
+    'Could not load courts. Check your connection and try again. [HTTP 406@lz4]'
+  );
+  assert.equal(withCourtLoadDiag('msg', null), 'msg');
+  assert.equal(withCourtLoadDiag('msg', undefined), 'msg');
+});
+
+test('host label never exposes full URL path', () => {
+  assert.equal(
+    overpassHostLabel('https://overpass-api.de/api/interpreter'),
+    'overpass'
+  );
+  assert.equal(
+    overpassHostLabel('https://lz4.overpass-api.de/api/interpreter'),
+    'lz4'
+  );
+});
+
+test('Retry-only display: non-force keeps plain error; force appends diag', () => {
+  const base = 'Court service is busy. Tap retry or pan the map to try again.';
+  const diag = 'HTTP 503@overpass';
+  // Mirror useMapCourts: append diag only when showDiag (force) is true.
+  const display = (force) =>
+    force ? withCourtLoadDiag(base, diag) : base;
+  assert.equal(display(false), base);
+  assert.equal(display(true), `${base} [${diag}]`);
+  assert.match(display(true), /\[HTTP 503@overpass\]$/);
+});
+
+test('empty HTTP 200 diag distinct from network failure diag', () => {
+  const empty = formatCourtLoadDiag({ host: 'overpass', category: 'empty' });
+  const network = formatCourtLoadDiag({ host: 'overpass', category: 'network' });
+  assert.notEqual(empty, network);
+  assert.equal(
+    withCourtLoadDiag('No courts found nearby', empty),
+    'No courts found nearby [empty@overpass]'
+  );
+});

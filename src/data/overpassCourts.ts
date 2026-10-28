@@ -303,8 +303,8 @@ out center;
 }
 
 export type FetchCourtsResult =
-  | { ok: true; courts: Court[]; fromCache: boolean }
-  | { ok: false; error: string };
+  | { ok: true; courts: Court[]; fromCache: boolean; /** Present when HTTP 200 yielded no usable courts. */ emptyDiag?: string }
+  | { ok: false; error: string; /** Safe tag e.g. `HTTP 406@lz4` — no coords/URLs/bodies. */ diag?: string };
 
 function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -315,6 +315,34 @@ function isAbortError(err: unknown): boolean {
     (err instanceof Error && err.name === 'AbortError') ||
     (typeof DOMException !== 'undefined' && err instanceof DOMException && err.name === 'AbortError')
   );
+}
+
+/** Short host label for diagnostics — never the full URL. */
+export function overpassHostLabel(endpoint: string): 'overpass' | 'lz4' {
+  return endpoint.includes('lz4.') ? 'lz4' : 'overpass';
+}
+
+/**
+ * Safe production diagnostic token (no coords, URLs, bodies, or secrets).
+ * Examples: `HTTP 406@lz4`, `timeout@overpass`, `empty@overpass`.
+ */
+export function formatCourtLoadDiag(parts: {
+  host: 'overpass' | 'lz4';
+  category: 'http' | 'timeout' | 'network' | 'invalid_json' | 'empty';
+  status?: number;
+}): string {
+  const { host, category, status } = parts;
+  if (category === 'http' && status != null) return `HTTP ${status}@${host}`;
+  if (category === 'timeout') return `timeout@${host}`;
+  if (category === 'network') return `network@${host}`;
+  if (category === 'invalid_json') return `invalid_json@${host}`;
+  return `empty@${host}`;
+}
+
+/** Append `[diag]` for TestFlight/error UI; leave message unchanged when diag is empty. */
+export function withCourtLoadDiag(message: string, diag?: string | null): string {
+  if (!diag) return message;
+  return `${message} [${diag}]`;
 }
 
 function errorMessageForStatus(status: number): string {
@@ -328,14 +356,15 @@ function errorMessageForStatus(status: number): string {
 }
 
 type AttemptResult =
-  | { ok: true; courts: Court[] }
-  | { ok: false; retryable: boolean; error: string };
+  | { ok: true; courts: Court[]; emptyDiag?: string }
+  | { ok: false; retryable: boolean; error: string; diag?: string };
 
 async function fetchOnce(
   endpoint: string,
   query: string,
   externalSignal?: AbortSignal
 ): Promise<AttemptResult> {
+  const host = overpassHostLabel(endpoint);
   const controller = new AbortController();
   const onExternalAbort = () => controller.abort();
   externalSignal?.addEventListener('abort', onExternalAbort);
@@ -354,9 +383,14 @@ async function fetchOnce(
 
     if (!response.ok) {
       const retryable = response.status === 429 || response.status >= 500;
+      const diag = formatCourtLoadDiag({
+        host,
+        category: 'http',
+        status: response.status,
+      });
       if (__DEV__) {
         console.log('[courts] Overpass HTTP error', {
-          endpoint,
+          host,
           status: response.status,
           retryable,
         });
@@ -365,14 +399,34 @@ async function fetchOnce(
         ok: false,
         retryable,
         error: errorMessageForStatus(response.status),
+        diag,
       };
     }
 
-    const json = (await response.json()) as OverpassResponse;
-    const mapped = (json.elements ?? [])
+    let payload: OverpassResponse;
+    try {
+      payload = (await response.json()) as OverpassResponse;
+    } catch {
+      return {
+        ok: false,
+        retryable: true,
+        error: 'Could not load courts. Check your connection and try again.',
+        diag: formatCourtLoadDiag({ host, category: 'invalid_json' }),
+      };
+    }
+
+    const mapped = (payload.elements ?? [])
       .map(elementToCourt)
       .filter((c): c is Court => c !== null);
-    return { ok: true, courts: dedupeCourts(mapped) };
+    const courts = dedupeCourts(mapped);
+    if (courts.length === 0) {
+      return {
+        ok: true,
+        courts,
+        emptyDiag: formatCourtLoadDiag({ host, category: 'empty' }),
+      };
+    }
+    return { ok: true, courts };
   } catch (err) {
     if (externalSignal?.aborted) {
       return { ok: false, retryable: false, error: 'Request cancelled.' };
@@ -382,12 +436,14 @@ async function fetchOnce(
         ok: false,
         retryable: true,
         error: 'Court search timed out. Tap retry or pan the map.',
+        diag: formatCourtLoadDiag({ host, category: 'timeout' }),
       };
     }
     return {
       ok: false,
       retryable: true,
       error: 'Could not load courts. Check your connection and try again.',
+      diag: formatCourtLoadDiag({ host, category: 'network' }),
     };
   } finally {
     clearTimeout(timer);
@@ -457,9 +513,10 @@ export async function fetchCourtsInRegion(
   const query = buildOverpassQuery(bbox);
   const startedAt = Date.now();
   let lastError = 'Could not load courts. Check your connection and try again.';
+  let lastDiag: string | undefined;
 
   if (__DEV__) {
-    console.log('[courts] search started', { bbox, force: !!options?.force });
+    console.log('[courts] search started', { force: !!options?.force });
   }
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -489,18 +546,26 @@ export async function fetchCourtsInRegion(
           durationMs: Date.now() - startedAt,
           resultCount: result.courts.length,
           attempt: attempt + 1,
-          endpoint,
+          host: overpassHostLabel(endpoint),
+          empty: result.courts.length === 0,
         });
       }
-      return { ok: true, courts: result.courts, fromCache: false };
+      return {
+        ok: true,
+        courts: result.courts,
+        fromCache: false,
+        emptyDiag: result.emptyDiag,
+      };
     }
 
     lastError = result.error;
+    lastDiag = result.diag;
     if (__DEV__) {
       console.log('[courts] attempt failed', {
         attempt: attempt + 1,
-        endpoint,
+        host: overpassHostLabel(endpoint),
         error: result.error,
+        diag: result.diag,
         retryable: result.retryable,
         durationMs: Date.now() - startedAt,
       });
@@ -531,11 +596,12 @@ export async function fetchCourtsInRegion(
       console.log('[courts] Overpass cooldown started', {
         cooldownMs: OVERPASS_COOLDOWN_MS,
         error: lastError,
+        diag: lastDiag,
       });
     }
   }
 
-  return { ok: false, error: lastError };
+  return { ok: false, error: lastError, diag: lastDiag };
 }
 
 /** Test-only: clear in-memory cache + cooldown between cases. */
