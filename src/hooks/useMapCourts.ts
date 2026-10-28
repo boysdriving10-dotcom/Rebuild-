@@ -86,7 +86,8 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
       return;
     }
 
-    const cached = getCachedCourts(region);
+    // Retry (`force`) must hit the network — do not short-circuit on memory cache.
+    const cached = !opts?.force ? getCachedCourts(region) : null;
     if (cached) {
       // Cache holds live Overpass results only — merge once as `live`, not as both args.
       const bbox = regionToBBox(region);

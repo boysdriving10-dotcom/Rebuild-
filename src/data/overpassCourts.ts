@@ -354,6 +354,13 @@ async function fetchOnce(
 
     if (!response.ok) {
       const retryable = response.status === 429 || response.status >= 500;
+      if (__DEV__) {
+        console.log('[courts] Overpass HTTP error', {
+          endpoint,
+          status: response.status,
+          retryable,
+        });
+      }
       return {
         ok: false,
         retryable,
@@ -421,15 +428,18 @@ export async function fetchCourtsInRegion(
     return { ok: true, courts: [], fromCache: false };
   }
 
-  const cached = getCachedCourts(region);
-  if (cached) {
-    if (__DEV__) {
-      console.log('[courts] cache hit', {
-        key: getBoundsCacheKey(regionToBBox(region)),
-        count: cached.length,
-      });
+  // Retry (`force`) bypasses memory cache so a fresh Overpass request is made.
+  if (!options?.force) {
+    const cached = getCachedCourts(region);
+    if (cached) {
+      if (__DEV__) {
+        console.log('[courts] cache hit', {
+          key: getBoundsCacheKey(regionToBBox(region)),
+          count: cached.length,
+        });
+      }
+      return { ok: true, courts: cached, fromCache: true };
     }
-    return { ok: true, courts: cached, fromCache: true };
   }
 
   const now = Date.now();
