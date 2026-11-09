@@ -33,6 +33,8 @@ export type CourtRow = {
 const COURT_SELECT =
   'id, name, latitude, longitude, address, city, region, country, source, source_id, verification_status, created_at, updated_at';
 
+export const COURTS_QUERY_LIMIT_MAX = 500;
+
 /** True when south ≤ north, west ≤ east, and values are finite map coordinates. */
 export function isValidCourtBBox(bbox: CourtBBox): boolean {
   const { south, west, north, east } = bbox;
@@ -43,6 +45,17 @@ export function isValidCourtBBox(bbox: CourtBBox): boolean {
   if (south < -90 || north > 90) return false;
   if (west < -180 || east > 180) return false;
   return true;
+}
+
+/**
+ * Clamp a requested page size to 1..COURTS_QUERY_LIMIT_MAX.
+ * Non-finite, ≤0, or missing values fall back to the max.
+ */
+export function clampCourtsQueryLimit(limit?: number): number {
+  if (typeof limit !== 'number' || !Number.isFinite(limit) || limit <= 0) {
+    return COURTS_QUERY_LIMIT_MAX;
+  }
+  return Math.min(Math.floor(limit), COURTS_QUERY_LIMIT_MAX);
 }
 
 /** Map a public.courts row to the app Court shape (activeGameIds filled by games layer). */
@@ -69,9 +82,12 @@ function friendlyCourtsError(message: string): string {
 }
 
 export type FetchCourtsInBoundsOptions = {
-  /** When true, only rows with verification_status = verified. Default false. */
+  /**
+   * When true (default), only rows with verification_status = verified.
+   * Pass false only for trusted/admin tooling — public RLS still hides non-verified rows.
+   */
   verifiedOnly?: boolean;
-  /** Soft cap to protect the client; default 500. */
+  /** Soft cap to protect the client; clamped to 1..500 (default 500). */
   limit?: number;
 };
 
@@ -94,10 +110,8 @@ export async function fetchCourtsInBounds(
     return { ok: false, error: 'Invalid map bounds.' };
   }
 
-  const limit = options?.limit ?? 500;
-  if (!Number.isFinite(limit) || limit <= 0) {
-    return { ok: false, error: 'Invalid court query limit.' };
-  }
+  const verifiedOnly = options?.verifiedOnly ?? true;
+  const limit = clampCourtsQueryLimit(options?.limit);
 
   let query = supabase
     .from('courts')
@@ -109,7 +123,7 @@ export async function fetchCourtsInBounds(
     .order('name', { ascending: true })
     .limit(limit);
 
-  if (options?.verifiedOnly) {
+  if (verifiedOnly) {
     query = query.eq('verification_status', 'verified');
   }
 
