@@ -47,7 +47,9 @@
     "ios": "expo run:ios",
     "ios:device": "expo run:ios --device",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "test:courts": "node --test scripts/test-courts-api.mjs",
+    "test:court-loading": "node --test scripts/test-court-loading.mjs"
   },
   "private": true
 }
