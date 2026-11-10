@@ -323,3 +323,51 @@ test('empty HTTP 200 diag distinct from network failure diag', () => {
     'No courts found nearby [empty@overpass]'
   );
 });
+
+/** Mirrors map.tsx isMeaningfulMapRegionChange — keep thresholds in sync. */
+function isMeaningfulMapRegionChange(from, to) {
+  const minCenterDelta = 0.002;
+  const centerMoved =
+    Math.abs(to.latitude - from.latitude) >= Math.max(from.latitudeDelta * 0.2, minCenterDelta) ||
+    Math.abs(to.longitude - from.longitude) >= Math.max(from.longitudeDelta * 0.2, minCenterDelta);
+  const zoomChanged =
+    Math.abs(to.latitudeDelta - from.latitudeDelta) >= from.latitudeDelta * 0.15 ||
+    Math.abs(to.longitudeDelta - from.longitudeDelta) >= from.longitudeDelta * 0.15;
+  return centerMoved || zoomChanged;
+}
+
+const BROOKLYN = {
+  latitude: 40.6782,
+  longitude: -73.9442,
+  latitudeDelta: 0.06,
+  longitudeDelta: 0.06,
+};
+
+test('meaningful region: ignores Brooklyn initial / tiny jitter', () => {
+  assert.equal(isMeaningfulMapRegionChange(BROOKLYN, { ...BROOKLYN }), false);
+  assert.equal(
+    isMeaningfulMapRegionChange(BROOKLYN, {
+      ...BROOKLYN,
+      latitude: BROOKLYN.latitude + 0.0005,
+    }),
+    false
+  );
+});
+
+test('meaningful region: pan or zoom unlocks search', () => {
+  assert.equal(
+    isMeaningfulMapRegionChange(BROOKLYN, {
+      ...BROOKLYN,
+      latitude: BROOKLYN.latitude + 0.02,
+    }),
+    true
+  );
+  assert.equal(
+    isMeaningfulMapRegionChange(BROOKLYN, {
+      ...BROOKLYN,
+      latitudeDelta: 0.03,
+      longitudeDelta: 0.03,
+    }),
+    true
+  );
+});
