@@ -26,6 +26,21 @@ import type { Court, Game } from '@/types';
 
 type LocationStatus = 'pending' | 'granted' | 'denied';
 
+/**
+ * True when the user has panned or zoomed enough vs a baseline region.
+ * Used so deny/GPS-failure does not search Brooklyn from tiny jitter or the initial camera.
+ */
+export function isMeaningfulMapRegionChange(from: Region, to: Region): boolean {
+  const minCenterDelta = 0.002;
+  const centerMoved =
+    Math.abs(to.latitude - from.latitude) >= Math.max(from.latitudeDelta * 0.2, minCenterDelta) ||
+    Math.abs(to.longitude - from.longitude) >= Math.max(from.longitudeDelta * 0.2, minCenterDelta);
+  const zoomChanged =
+    Math.abs(to.latitudeDelta - from.latitudeDelta) >= from.latitudeDelta * 0.15 ||
+    Math.abs(to.longitudeDelta - from.longitudeDelta) >= from.longitudeDelta * 0.15;
+  return centerMoved || zoomChanged;
+}
+
 export default function MapScreen() {
   const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView>(null);
@@ -38,15 +53,19 @@ export default function MapScreen() {
     null
   );
   const [mapReady, setMapReady] = useState(false);
+  /** True after the first intentional court search has been started. */
+  const [hasSearchedCourts, setHasSearchedCourts] = useState(false);
   const didCenterOnUser = useRef(false);
   /** While pending, ignore MapView region events so Brooklyn initialRegion is not searched. */
   const locationStatusRef = useRef<LocationStatus>(locationStatus);
   locationStatusRef.current = locationStatus;
   /**
-   * Court search via MapView region events is off until we either center on the
-   * user (granted) or the user pans after deny/GPS failure.
+   * Court search via MapView region events is off until GPS centers the user,
+   * or the user meaningfully pans/zooms after deny/GPS failure.
    */
   const allowRegionCourtSearchRef = useRef(false);
+  /** Baseline for the first unlock after deny (Brooklyn initialRegion). */
+  const lockedRegionBaselineRef = useRef<Region>(DEFAULT_REGION);
 
   const {
     courts,
@@ -123,26 +142,30 @@ export default function MapScreen() {
       longitudeDelta: 0.04,
     };
     mapRef.current?.animateToRegion(region, 450);
+    setHasSearchedCourts(true);
     onRegionChangeComplete(region);
   }, [mapReady, userCoord, onRegionChangeComplete]);
 
   // Denied / GPS failure: keep the banner, do not auto-search Brooklyn.
-  // Manual pan enables region court search below.
+  // Meaningful pan or zoom unlocks court search for the visible area.
 
   const handleRegionChangeComplete = useCallback(
     (region: Region) => {
       if (locationStatusRef.current === 'pending') return;
-      if (!allowRegionCourtSearchRef.current) return;
+
+      if (!allowRegionCourtSearchRef.current) {
+        // Still locked (deny/GPS fail): ignore Brooklyn initial camera and tiny jitter.
+        if (!isMeaningfulMapRegionChange(lockedRegionBaselineRef.current, region)) {
+          return;
+        }
+        allowRegionCourtSearchRef.current = true;
+      }
+
+      setHasSearchedCourts(true);
       onRegionChangeComplete(region);
     },
     [onRegionChangeComplete]
   );
-
-  const handlePanDrag = useCallback(() => {
-    // After deny/error, first pan unlocks court loading for the visible area.
-    if (locationStatusRef.current === 'pending') return;
-    allowRegionCourtSearchRef.current = true;
-  }, []);
 
   const recenter = useCallback(() => {
     if (!userCoord) return;
@@ -154,6 +177,7 @@ export default function MapScreen() {
       longitudeDelta: 0.04,
     };
     mapRef.current?.animateToRegion(region, 400);
+    setHasSearchedCourts(true);
     onRegionChangeComplete(region);
   }, [userCoord, onRegionChangeComplete]);
 
@@ -222,7 +246,6 @@ export default function MapScreen() {
         pitchEnabled
         userInterfaceStyle="dark"
         onMapReady={() => setMapReady(true)}
-        onPanDrag={handlePanDrag}
         onRegionChangeComplete={handleRegionChangeComplete}>
         {courts.map((court) => {
           const count = getGamesForCourt(court.id).length;
@@ -308,7 +331,7 @@ export default function MapScreen() {
         </View>
       ) : null}
 
-      {!loading && !error && !zoomedOut && courts.length === 0 ? (
+      {hasSearchedCourts && !loading && !error && !zoomedOut && courts.length === 0 ? (
         <View style={styles.hintBar}>
           <View>
             <Text style={styles.hintText}>No courts found nearby</Text>
