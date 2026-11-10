@@ -39,6 +39,14 @@ export default function MapScreen() {
   );
   const [mapReady, setMapReady] = useState(false);
   const didCenterOnUser = useRef(false);
+  /** While pending, ignore MapView region events so Brooklyn initialRegion is not searched. */
+  const locationStatusRef = useRef<LocationStatus>(locationStatus);
+  locationStatusRef.current = locationStatus;
+  /**
+   * Court search via MapView region events is off until we either center on the
+   * user (granted) or the user pans after deny/GPS failure.
+   */
+  const allowRegionCourtSearchRef = useRef(false);
 
   const {
     courts,
@@ -107,6 +115,7 @@ export default function MapScreen() {
   useEffect(() => {
     if (!mapReady || !userCoord || didCenterOnUser.current) return;
     didCenterOnUser.current = true;
+    allowRegionCourtSearchRef.current = true;
     const region: Region = {
       latitude: userCoord.latitude,
       longitude: userCoord.longitude,
@@ -117,16 +126,27 @@ export default function MapScreen() {
     onRegionChangeComplete(region);
   }, [mapReady, userCoord, onRegionChangeComplete]);
 
-  // Location denied: still search the default visible region once.
-  useEffect(() => {
-    if (locationStatus !== 'denied') return;
-    if (didCenterOnUser.current) return;
-    didCenterOnUser.current = true;
-    onRegionChangeComplete(DEFAULT_REGION);
-  }, [locationStatus, onRegionChangeComplete]);
+  // Denied / GPS failure: keep the banner, do not auto-search Brooklyn.
+  // Manual pan enables region court search below.
+
+  const handleRegionChangeComplete = useCallback(
+    (region: Region) => {
+      if (locationStatusRef.current === 'pending') return;
+      if (!allowRegionCourtSearchRef.current) return;
+      onRegionChangeComplete(region);
+    },
+    [onRegionChangeComplete]
+  );
+
+  const handlePanDrag = useCallback(() => {
+    // After deny/error, first pan unlocks court loading for the visible area.
+    if (locationStatusRef.current === 'pending') return;
+    allowRegionCourtSearchRef.current = true;
+  }, []);
 
   const recenter = useCallback(() => {
     if (!userCoord) return;
+    allowRegionCourtSearchRef.current = true;
     const region: Region = {
       latitude: userCoord.latitude,
       longitude: userCoord.longitude,
@@ -202,7 +222,8 @@ export default function MapScreen() {
         pitchEnabled
         userInterfaceStyle="dark"
         onMapReady={() => setMapReady(true)}
-        onRegionChangeComplete={(region) => onRegionChangeComplete(region)}>
+        onPanDrag={handlePanDrag}
+        onRegionChangeComplete={handleRegionChangeComplete}>
         {courts.map((court) => {
           const count = getGamesForCourt(court.id).length;
           return (
