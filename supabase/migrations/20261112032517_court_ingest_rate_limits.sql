@@ -4,12 +4,10 @@
 
 create schema if not exists private;
 
--- Lock down the private schema: no direct access for end-user roles.
--- postgres + service_role retain USAGE so direct-DB workers (e.g. notification
--- outbox via SUPABASE_DB_URL) and service-role RPCs keep access to private.*.
-revoke all on schema private from public, anon, authenticated;
-grant usage on schema private to postgres, service_role;
-grant create on schema private to postgres;
+-- Do NOT revoke/alter schema-level privileges on private.
+-- process-notification-outbox already uses private.notification_outbox via
+-- SUPABASE_DB_URL; its connection role is not readable from secrets, so existing
+-- private schema USAGE must be preserved. Lockdown is table-scoped below.
 
 create table if not exists private.court_ingest_rate_limits (
   user_id uuid primary key references auth.users (id) on delete cascade,
