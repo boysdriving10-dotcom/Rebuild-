@@ -1,0 +1,20 @@
+# Local Supabase configuration for BallOut.
+# Project ref (production): gmbemxavzuhqejanzqhy
+# Do not commit secrets. Service role stays server-side only.
+
+[project]
+id = "gmbemxavzuhqejanzqhy"
+
+[api]
+enabled = true
+
+[db]
+major_version = 17
+
+[functions.upsert-discovered-courts]
+# Require a real user JWT at the gateway; reject missing/invalid tokens.
+verify_jwt = true
+
+[functions.process-notification-outbox]
+# Existing cron worker — uses shared secret header, not end-user JWT.
+verify_jwt = false
