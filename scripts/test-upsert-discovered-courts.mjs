@@ -1,130 +1,31 @@
 /**
- * Offline tests for upsert-discovered-courts ingest logic (no network / no Supabase).
- * Keep in sync with supabase/functions/upsert-discovered-courts/ingestLogic.ts
- * Run: node --test scripts/test-upsert-discovered-courts.mjs
+ * Offline tests for upsert-discovered-courts — imports production ingestLogic.ts.
+ * Run: npm run test:upsert-courts
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-const MAX_OSM_IDS_PER_REQUEST = 40;
-const RATE_LIMIT_MAX_REQUESTS = 10;
-const RATE_LIMIT_WINDOW_SECONDS = 600;
+import {
+  COURT_REFRESH_AFTER_MS,
+  GLOBAL_RATE_LIMIT_MAX_REQUESTS,
+  GLOBAL_RATE_LIMIT_WINDOW_SECONDS,
+  RATE_LIMIT_MAX_REQUESTS,
+  RATE_LIMIT_WINDOW_SECONDS,
+  applyCombinedRateLimits,
+  applyRateLimitWindow,
+  coordsFromElement,
+  courtRowFromOverpassElement,
+  decideUserAuth,
+  enforceIdCap,
+  hasBasketballEvidence,
+  interpretRateLimitResult,
+  parseExistingCourtsLookup,
+  parseOsmIdentities,
+  partitionIdentitiesForFetch,
+  sourceIdKey,
+} from '../supabase/functions/upsert-discovered-courts/ingestLogic.ts';
 
-function parseOsmIdentities(input) {
-  if (!Array.isArray(input)) return { identities: [], rejected: 0 };
-  const seen = new Set();
-  const identities = [];
-  let rejected = 0;
-  for (const item of input) {
-    if (!item || typeof item !== 'object') {
-      rejected += 1;
-      continue;
-    }
-    const type = typeof item.type === 'string' ? item.type.trim().toLowerCase() : '';
-    const idNum =
-      typeof item.id === 'number'
-        ? item.id
-        : typeof item.id === 'string' && /^\d+$/.test(item.id.trim())
-          ? Number(item.id.trim())
-          : NaN;
-    if ((type !== 'node' && type !== 'way') || !Number.isInteger(idNum) || idNum <= 0) {
-      rejected += 1;
-      continue;
-    }
-    const key = `${type}/${idNum}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    identities.push({ type, id: idNum });
-  }
-  return { identities, rejected };
-}
-
-function enforceIdCap(identities) {
-  if (identities.length <= MAX_OSM_IDS_PER_REQUEST) {
-    return { accepted: identities, truncated: 0 };
-  }
-  return {
-    accepted: identities.slice(0, MAX_OSM_IDS_PER_REQUEST),
-    truncated: identities.length - MAX_OSM_IDS_PER_REQUEST,
-  };
-}
-
-function hasBasketballEvidence(tags) {
-  if (!tags || typeof tags !== 'object') return false;
-  const sportTokens = (tags.sport ?? '')
-    .toLowerCase()
-    .split(/[;|,]/)
-    .map((t) => t.trim())
-    .filter(Boolean);
-  return sportTokens.includes('basketball');
-}
-
-function coordsFromElement(el) {
-  const latitude = el.lat ?? el.center?.lat;
-  const longitude = el.lon ?? el.center?.lon;
-  if (typeof latitude !== 'number' || typeof longitude !== 'number') return null;
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
-  if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return null;
-  if (latitude === 0 && longitude === 0) return null;
-  return { latitude, longitude };
-}
-
-function courtRowFromOverpassElement(el) {
-  const type = el.type === 'node' || el.type === 'way' ? el.type : null;
-  const id = typeof el.id === 'number' && Number.isInteger(el.id) && el.id > 0 ? el.id : null;
-  if (!type || id == null) return null;
-  if (!hasBasketballEvidence(el.tags)) return null;
-  const coords = coordsFromElement(el);
-  if (!coords) return null;
-  return {
-    name: el.tags?.name?.trim() || 'Basketball Court',
-    latitude: coords.latitude,
-    longitude: coords.longitude,
-    source: 'overpass',
-    source_id: `${type}/${id}`,
-    verification_status: 'verified',
-  };
-}
-
-function decideUserAuth(user) {
-  if (!user || typeof user.id !== 'string' || user.id.length === 0) {
-    return { ok: false, status: 401, error: 'unauthorized' };
-  }
-  if (user.role === 'anon' || user.id === 'anonymous') {
-    return { ok: false, status: 401, error: 'anonymous_not_allowed' };
-  }
-  return { ok: true, userId: user.id };
-}
-
-function applyRateLimitWindow(state, nowMs, maxRequests = RATE_LIMIT_MAX_REQUESTS, windowMs = RATE_LIMIT_WINDOW_SECONDS * 1000) {
-  let windowStartedAtMs = state?.windowStartedAtMs ?? nowMs;
-  let requestCount = state?.requestCount ?? 0;
-  if (!state || windowStartedAtMs <= nowMs - windowMs) {
-    windowStartedAtMs = nowMs;
-    requestCount = 0;
-  }
-  if (requestCount >= maxRequests) {
-    return {
-      next: { windowStartedAtMs, requestCount },
-      decision: { allowed: false, remaining: 0, request_count: requestCount, reason: 'rate_limited' },
-    };
-  }
-  requestCount += 1;
-  return {
-    next: { windowStartedAtMs, requestCount },
-    decision: {
-      allowed: true,
-      remaining: Math.max(maxRequests - requestCount, 0),
-      request_count: requestCount,
-    },
-  };
-}
-
-function classifyOverpassFailure(kind) {
-  return { ok: true, inserted: 0, skipped: 0, rejected: 'passthrough', soft: true, kind };
-}
-
-test('auth: rejects missing and anonymous users', () => {
+test('auth: rejects missing, anon-role, and Supabase anonymous users', () => {
   assert.deepEqual(decideUserAuth(null), { ok: false, status: 401, error: 'unauthorized' });
   assert.deepEqual(decideUserAuth({}), { ok: false, status: 401, error: 'unauthorized' });
   assert.deepEqual(decideUserAuth({ id: 'anonymous', role: 'anon' }), {
@@ -132,10 +33,22 @@ test('auth: rejects missing and anonymous users', () => {
     status: 401,
     error: 'anonymous_not_allowed',
   });
-  assert.deepEqual(decideUserAuth({ id: '11111111-1111-1111-1111-111111111111' }), {
-    ok: true,
-    userId: '11111111-1111-1111-1111-111111111111',
-  });
+  assert.deepEqual(
+    decideUserAuth({
+      id: '11111111-1111-1111-1111-111111111111',
+      role: 'authenticated',
+      is_anonymous: true,
+    }),
+    { ok: false, status: 401, error: 'anonymous_not_allowed' }
+  );
+  assert.deepEqual(
+    decideUserAuth({
+      id: '11111111-1111-1111-1111-111111111111',
+      role: 'authenticated',
+      is_anonymous: false,
+    }),
+    { ok: true, userId: '11111111-1111-1111-1111-111111111111' }
+  );
 });
 
 test('malformed OSM identities are rejected; duplicates de-duped', () => {
@@ -165,89 +78,178 @@ test('request ID cap truncates above 40', () => {
   assert.equal(capped.truncated, 5);
 });
 
-test('basketball tag validation requires sport evidence', () => {
-  assert.equal(hasBasketballEvidence({ sport: 'basketball' }), true);
-  assert.equal(hasBasketballEvidence({ sport: 'tennis;basketball' }), true);
+test('basketball evidence requires credible court/pitch tagging', () => {
   assert.equal(hasBasketballEvidence({ leisure: 'pitch', sport: 'basketball' }), true);
+  assert.equal(hasBasketballEvidence({ leisure: 'pitch', sport: 'tennis;basketball' }), true);
+  assert.equal(hasBasketballEvidence({ leisure: 'sports_centre', sport: 'basketball' }), true);
+  // Bare sport=basketball nodes remain legitimate OSM courts.
+  assert.equal(hasBasketballEvidence({ sport: 'basketball' }), true);
   assert.equal(hasBasketballEvidence({ sport: 'tennis' }), false);
   assert.equal(hasBasketballEvidence({ leisure: 'pitch' }), false);
+  assert.equal(hasBasketballEvidence({ leisure: 'swimming_pool', sport: 'basketball' }), false);
+  assert.equal(hasBasketballEvidence({ sport: 'basketball', shop: 'sports' }), false);
+  assert.equal(hasBasketballEvidence({ sport: 'basketball', amenity: 'cafe' }), false);
   assert.equal(hasBasketballEvidence({}), false);
   assert.equal(hasBasketballEvidence(null), false);
 });
 
-test('invalid coordinates are rejected', () => {
+test('invalid coordinates are rejected; way centers accepted', () => {
   assert.equal(coordsFromElement({ lat: 91, lon: 0 }), null);
   assert.equal(coordsFromElement({ lat: 0, lon: 0 }), null);
   assert.equal(coordsFromElement({ lat: NaN, lon: -75 }), null);
   assert.equal(coordsFromElement({ center: { lat: 39.7, lon: -75.0 } })?.latitude, 39.7);
 });
 
-test('court rows require basketball evidence and valid coords', () => {
+test('court rows require basketball evidence, valid coords, and bump updated_at', () => {
   assert.equal(
-    courtRowFromOverpassElement({
-      type: 'node',
-      id: 1,
-      lat: 39.7,
-      lon: -75,
-      tags: { sport: 'tennis' },
-    }),
+    courtRowFromOverpassElement(
+      {
+        type: 'node',
+        id: 1,
+        lat: 39.7,
+        lon: -75,
+        tags: { sport: 'tennis' },
+      },
+      '2026-11-12T00:00:00.000Z'
+    ),
     null
   );
-  assert.equal(
-    courtRowFromOverpassElement({
+  const row = courtRowFromOverpassElement(
+    {
       type: 'way',
       id: 2,
       center: { lat: 39.7, lon: -75 },
-      tags: { sport: 'basketball', name: 'Park Court' },
-    })?.source_id,
-    'way/2'
+      tags: { leisure: 'pitch', sport: 'basketball', name: 'Park Court' },
+    },
+    '2026-11-12T00:00:00.000Z'
   );
-  assert.equal(
-    courtRowFromOverpassElement({
-      type: 'way',
-      id: 2,
-      center: { lat: 39.7, lon: -75 },
-      tags: { sport: 'basketball', name: 'Park Court' },
-    })?.verification_status,
-    'verified'
-  );
+  assert.equal(row?.source_id, 'way/2');
+  assert.equal(row?.verification_status, 'verified');
+  assert.equal(row?.updated_at, '2026-11-12T00:00:00.000Z');
 });
 
-test('duplicate IDs in one request are collapsed before fetch', () => {
-  const parsed = parseOsmIdentities([
-    { type: 'node', id: 10 },
-    { type: 'node', id: 10 },
-    { type: 'node', id: 10 },
-  ]);
-  assert.equal(parsed.identities.length, 1);
-  assert.equal(parsed.rejected, 0);
-});
-
-test('rate limiting allows 10 requests then blocks within 10 minutes', () => {
+test('per-user rate limiting allows 10 requests then blocks within 10 minutes', () => {
   let state = null;
   const start = 1_000_000;
-  for (let i = 0; i < 10; i++) {
-    const result = applyRateLimitWindow(state, start + i);
+  for (let i = 0; i < RATE_LIMIT_MAX_REQUESTS; i++) {
+    const result = applyRateLimitWindow(
+      state,
+      start + i,
+      RATE_LIMIT_MAX_REQUESTS,
+      RATE_LIMIT_WINDOW_SECONDS * 1000,
+      'rate_limited'
+    );
     assert.equal(result.decision.allowed, true);
     state = result.next;
   }
-  const blocked = applyRateLimitWindow(state, start + 11);
+  const blocked = applyRateLimitWindow(
+    state,
+    start + 11,
+    RATE_LIMIT_MAX_REQUESTS,
+    RATE_LIMIT_WINDOW_SECONDS * 1000,
+    'rate_limited'
+  );
   assert.equal(blocked.decision.allowed, false);
   assert.equal(blocked.decision.reason, 'rate_limited');
-
-  const afterWindow = applyRateLimitWindow(blocked.next, start + RATE_LIMIT_WINDOW_SECONDS * 1000 + 1);
-  assert.equal(afterWindow.decision.allowed, true);
-  assert.equal(afterWindow.decision.request_count, 1);
 });
 
-test('failed Overpass responses are soft-fail friendly', () => {
-  for (const kind of ['timeout', 'network', 'http_error', 'invalid_json']) {
-    const result = classifyOverpassFailure(kind);
-    assert.equal(result.ok, true);
-    assert.equal(result.inserted, 0);
-    assert.equal(result.soft, true);
-    assert.equal(result.kind, kind);
+test('global rate limiting blocks after budget even across different users', () => {
+  let globalState = null;
+  const start = 2_000_000;
+  for (let i = 0; i < GLOBAL_RATE_LIMIT_MAX_REQUESTS; i++) {
+    const result = applyCombinedRateLimits(globalState, null, start + i, {
+      userMax: RATE_LIMIT_MAX_REQUESTS,
+      globalMax: GLOBAL_RATE_LIMIT_MAX_REQUESTS,
+      globalWindowMs: GLOBAL_RATE_LIMIT_WINDOW_SECONDS * 1000,
+    });
+    assert.equal(result.decision.allowed, true, `expected allow at ${i}`);
+    globalState = result.nextGlobal;
   }
+  const blocked = applyCombinedRateLimits(globalState, null, start + GLOBAL_RATE_LIMIT_MAX_REQUESTS + 1, {
+    userMax: RATE_LIMIT_MAX_REQUESTS,
+    globalMax: GLOBAL_RATE_LIMIT_MAX_REQUESTS,
+    globalWindowMs: GLOBAL_RATE_LIMIT_WINDOW_SECONDS * 1000,
+  });
+  assert.equal(blocked.decision.allowed, false);
+  assert.equal(blocked.decision.reason, 'global_rate_limited');
+});
+
+test('per-user limit does not consume global budget in the combined simulator', () => {
+  let globalState = { windowStartedAtMs: 3_000_000, requestCount: 5 };
+  let userState = { windowStartedAtMs: 3_000_000, requestCount: RATE_LIMIT_MAX_REQUESTS };
+  const blocked = applyCombinedRateLimits(globalState, userState, 3_000_001, {
+    userMax: RATE_LIMIT_MAX_REQUESTS,
+    globalMax: GLOBAL_RATE_LIMIT_MAX_REQUESTS,
+  });
+  assert.equal(blocked.decision.allowed, false);
+  assert.equal(blocked.decision.reason, 'rate_limited');
+  assert.equal(blocked.nextGlobal.requestCount, 5);
+});
+
+test('interpretRateLimitResult fails closed and preserves global reason', () => {
+  assert.equal(interpretRateLimitResult(null).allowed, false);
+  assert.equal(interpretRateLimitResult(null).reason, 'rate_limit_unavailable');
+  assert.deepEqual(
+    interpretRateLimitResult({
+      allowed: false,
+      remaining: 0,
+      request_count: 10,
+      global_remaining: 40,
+      reason: 'global_rate_limited',
+    }).reason,
+    'global_rate_limited'
+  );
+});
+
+test('database lookup failures fail closed', () => {
+  assert.deepEqual(parseExistingCourtsLookup(null, { message: 'db down' }), {
+    ok: false,
+    error: 'lookup_failed',
+  });
+  assert.deepEqual(parseExistingCourtsLookup(null, null), {
+    ok: false,
+    error: 'lookup_failed',
+  });
+  const ok = parseExistingCourtsLookup(
+    [{ source_id: 'node/1', updated_at: '2026-11-01T00:00:00.000Z' }],
+    null
+  );
+  assert.equal(ok.ok, true);
+  if (ok.ok) {
+    assert.equal(ok.bySourceId.get('node/1')?.updatedAtMs, Date.parse('2026-11-01T00:00:00.000Z'));
+  }
+});
+
+test('refresh fetches stale courts but skips fresh ones', () => {
+  const now = Date.parse('2026-11-12T00:00:00.000Z');
+  const identities = [
+    { type: 'node', id: 1 },
+    { type: 'node', id: 2 },
+    { type: 'way', id: 3 },
+  ];
+  const existing = new Map([
+    [
+      'node/1',
+      {
+        source_id: 'node/1',
+        updatedAtMs: now - 60_000, // fresh
+      },
+    ],
+    [
+      'node/2',
+      {
+        source_id: 'node/2',
+        updatedAtMs: now - COURT_REFRESH_AFTER_MS - 1, // stale
+      },
+    ],
+  ]);
+  const result = partitionIdentitiesForFetch(identities, existing, now, COURT_REFRESH_AFTER_MS);
+  assert.equal(result.skippedFresh, 1);
+  assert.equal(result.refreshCount, 1);
+  assert.deepEqual(
+    result.toFetch.map((i) => sourceIdKey(i.type, i.id)),
+    ['node/2', 'way/3']
+  );
 });
 
 test('app-facing osm ids remain type/id based for games', () => {
@@ -256,10 +258,9 @@ test('app-facing osm ids remain type/id based for games', () => {
     id: 123,
     lat: 40,
     lon: -74,
-    tags: { sport: 'basketball' },
+    tags: { leisure: 'pitch', sport: 'basketball' },
   });
   assert.equal(row.source, 'overpass');
   assert.equal(row.source_id, 'node/123');
-  // Phase 1 mapper would turn this into osm-node-123
   assert.equal(`osm-${row.source_id.replace('/', '-')}`, 'osm-node-123');
 });

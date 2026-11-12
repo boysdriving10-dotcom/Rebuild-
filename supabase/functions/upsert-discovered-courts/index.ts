@@ -1,15 +1,17 @@
 /**
  * upsert-discovered-courts
  *
- * Authenticated users may submit OSM node/way IDs only. This function
- * re-fetches those elements from Overpass, validates basketball evidence +
- * coordinates, then upserts verified rows with the service role.
+ * Authenticated (non-anonymous) users may submit OSM node/way IDs only. This
+ * function re-fetches those elements from Overpass, validates basketball court
+ * evidence + coordinates, then upserts verified rows with the service role.
  *
  * Never deploy secrets to the mobile app. Do not trust client lat/name.
  */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1';
 
 import {
+  GLOBAL_RATE_LIMIT_MAX_REQUESTS,
+  GLOBAL_RATE_LIMIT_WINDOW_SECONDS,
   OVERPASS_TIMEOUT_MS,
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_SECONDS,
@@ -18,7 +20,9 @@ import {
   decideUserAuth,
   enforceIdCap,
   interpretRateLimitResult,
+  parseExistingCourtsLookup,
   parseOsmIdentities,
+  partitionIdentitiesForFetch,
   sourceIdKey,
   type CourtUpsertRow,
   type OsmIdentity,
@@ -68,24 +72,38 @@ Deno.serve(async (request) => {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
-    const rate = interpretRateLimitResult(
-      (
-        await serviceClient.rpc('consume_court_ingest_rate_limit', {
-          p_user_id: auth.userId,
-          p_max_requests: RATE_LIMIT_MAX_REQUESTS,
-          p_window_seconds: RATE_LIMIT_WINDOW_SECONDS,
-        })
-      ).data
-    );
-    if (!rate.allowed) {
+    const rateRpc = await serviceClient.rpc('consume_court_ingest_rate_limit', {
+      p_user_id: auth.userId,
+      p_max_requests: RATE_LIMIT_MAX_REQUESTS,
+      p_window_seconds: RATE_LIMIT_WINDOW_SECONDS,
+      p_global_max_requests: GLOBAL_RATE_LIMIT_MAX_REQUESTS,
+      p_global_window_seconds: GLOBAL_RATE_LIMIT_WINDOW_SECONDS,
+    });
+    if (rateRpc.error) {
       return json(
         {
           ok: false,
-          error: 'rate_limited',
+          error: 'rate_limit_unavailable',
+          inserted: 0,
+          skipped: 0,
+          rejected: 0,
+        },
+        503
+      );
+    }
+    const rate = interpretRateLimitResult(rateRpc.data);
+    if (!rate.allowed) {
+      const error =
+        rate.reason === 'global_rate_limited' ? 'global_rate_limited' : 'rate_limited';
+      return json(
+        {
+          ok: false,
+          error,
           inserted: 0,
           skipped: 0,
           rejected: 0,
           remaining: rate.remaining,
+          global_remaining: rate.global_remaining ?? 0,
         },
         429
       );
@@ -108,19 +126,55 @@ Deno.serve(async (request) => {
     let rejected = parsed.rejected + capped.truncated;
     let skipped = 0;
     let inserted = 0;
+    let refreshed = 0;
 
     const identities = capped.accepted;
     if (identities.length === 0) {
-      return json({ ok: true, inserted: 0, skipped: 0, rejected, remaining: rate.remaining });
+      return json({
+        ok: true,
+        inserted: 0,
+        skipped: 0,
+        rejected,
+        refreshed: 0,
+        remaining: rate.remaining,
+        global_remaining: rate.global_remaining ?? 0,
+      });
     }
 
-    // Skip IDs already present (counts as skipped — still may refresh via upsert below if we fetch).
-    const existingKeys = await loadExistingSourceIds(serviceClient, identities);
-    const toFetch = identities.filter((id) => !existingKeys.has(sourceIdKey(id.type, id.id)));
-    skipped += identities.length - toFetch.length;
+    const existingLookup = await loadExistingCourts(serviceClient, identities);
+    if (!existingLookup.ok) {
+      return json(
+        {
+          ok: false,
+          error: 'courts_lookup_failed',
+          inserted: 0,
+          skipped: 0,
+          rejected: 0,
+          remaining: rate.remaining,
+          global_remaining: rate.global_remaining ?? 0,
+        },
+        503
+      );
+    }
+
+    const partitioned = partitionIdentitiesForFetch(
+      identities,
+      existingLookup.bySourceId,
+      Date.now()
+    );
+    skipped += partitioned.skippedFresh;
+    const toFetch = partitioned.toFetch;
 
     if (toFetch.length === 0) {
-      return json({ ok: true, inserted: 0, skipped, rejected, remaining: rate.remaining });
+      return json({
+        ok: true,
+        inserted: 0,
+        skipped,
+        rejected,
+        refreshed: 0,
+        remaining: rate.remaining,
+        global_remaining: rate.global_remaining ?? 0,
+      });
     }
 
     const overpass = await fetchOverpassElements(toFetch);
@@ -131,11 +185,14 @@ Deno.serve(async (request) => {
         inserted: 0,
         skipped,
         rejected: rejected + toFetch.length,
+        refreshed: 0,
         overpass_error: overpass.error,
         remaining: rate.remaining,
+        global_remaining: rate.global_remaining ?? 0,
       });
     }
 
+    const nowIso = new Date().toISOString();
     const rows: CourtUpsertRow[] = [];
     const seenFetched = new Set<string>();
     for (const identity of toFetch) {
@@ -145,7 +202,7 @@ Deno.serve(async (request) => {
         rejected += 1;
         continue;
       }
-      const row = courtRowFromOverpassElement(el);
+      const row = courtRowFromOverpassElement(el, nowIso);
       if (!row) {
         rejected += 1;
         continue;
@@ -155,6 +212,9 @@ Deno.serve(async (request) => {
         continue;
       }
       seenFetched.add(row.source_id);
+      if (existingLookup.bySourceId.has(row.source_id)) {
+        refreshed += 1;
+      }
       rows.push(row);
     }
 
@@ -171,12 +231,14 @@ Deno.serve(async (request) => {
             inserted: 0,
             skipped,
             rejected,
+            refreshed: 0,
             remaining: rate.remaining,
+            global_remaining: rate.global_remaining ?? 0,
           },
           500
         );
       }
-      inserted = rows.length;
+      inserted = rows.length - refreshed;
     }
 
     return json({
@@ -184,29 +246,26 @@ Deno.serve(async (request) => {
       inserted,
       skipped,
       rejected,
+      refreshed,
       remaining: rate.remaining,
+      global_remaining: rate.global_remaining ?? 0,
     });
   } catch {
     return json({ ok: false, error: 'internal_error', inserted: 0, skipped: 0, rejected: 0 }, 500);
   }
 });
 
-async function loadExistingSourceIds(
+async function loadExistingCourts(
   serviceClient: ReturnType<typeof createClient>,
   identities: OsmIdentity[]
-): Promise<Set<string>> {
+): Promise<ReturnType<typeof parseExistingCourtsLookup>> {
   const keys = identities.map((i) => sourceIdKey(i.type, i.id));
   const { data, error } = await serviceClient
     .from('courts')
-    .select('source_id')
+    .select('source_id, updated_at')
     .eq('source', 'overpass')
     .in('source_id', keys);
-  if (error || !data) return new Set();
-  return new Set(
-    data
-      .map((row) => (typeof row.source_id === 'string' ? row.source_id : null))
-      .filter((id): id is string => Boolean(id))
-  );
+  return parseExistingCourtsLookup(data, error);
 }
 
 async function fetchOverpassElements(identities: OsmIdentity[]): Promise<

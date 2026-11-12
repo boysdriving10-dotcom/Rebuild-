@@ -3,7 +3,27 @@
 export const MAX_OSM_IDS_PER_REQUEST = 40;
 export const RATE_LIMIT_MAX_REQUESTS = 10;
 export const RATE_LIMIT_WINDOW_SECONDS = 600;
+export const GLOBAL_RATE_LIMIT_MAX_REQUESTS = 100;
+export const GLOBAL_RATE_LIMIT_WINDOW_SECONDS = 600;
+/** Re-fetch existing verified courts at most once per week. */
+export const COURT_REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 export const OVERPASS_TIMEOUT_MS = 15_000;
+
+/** Leisure values that credibly describe a basketball court / pitch facility. */
+const CREDIBLE_COURT_LEISURE = new Set([
+  'pitch',
+  'sports_centre',
+  'stadium',
+  'recreation_ground',
+  'fitness_centre',
+]);
+
+/** Amenities that are compatible with a court mapped on shared community facilities. */
+const COMPATIBLE_AMENITIES = new Set([
+  'community_centre',
+  'social_facility',
+  'public_building',
+]);
 
 export type OsmElementType = 'node' | 'way';
 
@@ -32,6 +52,12 @@ export type CourtUpsertRow = {
   source: 'overpass';
   source_id: string;
   verification_status: 'verified';
+  updated_at: string;
+};
+
+export type ExistingCourtRecord = {
+  source_id: string;
+  updatedAtMs: number | null;
 };
 
 export function parseOsmIdentities(input: unknown): {
@@ -90,23 +116,42 @@ export function enforceIdCap(identities: OsmIdentity[]): {
   };
 }
 
-/** True when OSM tags establish basketball-specific evidence. */
-export function hasBasketballEvidence(tags: Record<string, string> | undefined | null): boolean {
-  if (!tags || typeof tags !== 'object') return false;
-
-  const sport = (tags.sport ?? '').toLowerCase();
-  const sportTokens = sport
+function sportTokensFromTags(tags: Record<string, string>): string[] {
+  return (tags.sport ?? '')
+    .toLowerCase()
     .split(/[;|,]/)
     .map((t) => t.trim())
     .filter(Boolean);
-  if (sportTokens.includes('basketball')) return true;
+}
 
-  // Explicit pitch typed as basketball via combined tags already covered by sport.
-  // Also accept leisure=pitch with basketball in sport (handled above).
-  const leisure = (tags.leisure ?? '').toLowerCase();
-  if (leisure === 'pitch' && sportTokens.includes('basketball')) return true;
+/**
+ * True when OSM tags establish credible basketball court / pitch evidence.
+ * Requires sport=basketball plus a pitch-like leisure tag, or a bare
+ * sport=basketball element that is not tagged as an unrelated POI.
+ */
+export function hasBasketballEvidence(tags: Record<string, string> | undefined | null): boolean {
+  if (!tags || typeof tags !== 'object') return false;
 
-  return false;
+  const sportTokens = sportTokensFromTags(tags);
+  if (!sportTokens.includes('basketball')) return false;
+
+  const leisure = (tags.leisure ?? '').toLowerCase().trim();
+  if (leisure) {
+    return CREDIBLE_COURT_LEISURE.has(leisure);
+  }
+
+  // Bare sport=basketball nodes/ways are common legitimate courts in OSM
+  // (and match map discovery). Reject when tagged as a commercial/tourist POI.
+  const shop = (tags.shop ?? '').toLowerCase().trim();
+  const tourism = (tags.tourism ?? '').toLowerCase().trim();
+  const office = (tags.office ?? '').toLowerCase().trim();
+  const craft = (tags.craft ?? '').toLowerCase().trim();
+  if (shop || tourism || office || craft) return false;
+
+  const amenity = (tags.amenity ?? '').toLowerCase().trim();
+  if (amenity && !COMPATIBLE_AMENITIES.has(amenity)) return false;
+
+  return true;
 }
 
 export function coordsFromElement(el: OverpassElement): { latitude: number; longitude: number } | null {
@@ -150,7 +195,10 @@ export function addressFromTags(tags: Record<string, string>): string | null {
 /**
  * Build a verified upsert row from a trusted Overpass element, or null if rejected.
  */
-export function courtRowFromOverpassElement(el: OverpassElement): CourtUpsertRow | null {
+export function courtRowFromOverpassElement(
+  el: OverpassElement,
+  nowIso: string = new Date().toISOString()
+): CourtUpsertRow | null {
   const type = el.type === 'node' || el.type === 'way' ? el.type : null;
   const id = typeof el.id === 'number' && Number.isInteger(el.id) && el.id > 0 ? el.id : null;
   if (!type || id == null) return null;
@@ -172,6 +220,7 @@ export function courtRowFromOverpassElement(el: OverpassElement): CourtUpsertRow
     source: 'overpass',
     source_id: `${type}/${id}`,
     verification_status: 'verified',
+    updated_at: nowIso,
   };
 }
 
@@ -199,12 +248,21 @@ export type AuthDecision =
   | { ok: false; status: 401; error: 'unauthorized' | 'anonymous_not_allowed' };
 
 /** Decide auth from a Supabase getUser-style result. */
-export function decideUserAuth(user: { id?: string | null; role?: string | null } | null | undefined): AuthDecision {
+export function decideUserAuth(
+  user:
+    | {
+        id?: string | null;
+        role?: string | null;
+        is_anonymous?: boolean | null;
+      }
+    | null
+    | undefined
+): AuthDecision {
   if (!user || typeof user.id !== 'string' || user.id.length === 0) {
     return { ok: false, status: 401, error: 'unauthorized' };
   }
-  // Reject explicitly anonymous JWT subjects if present.
-  if (user.role === 'anon' || user.id === 'anonymous') {
+  // Reject anon JWT role, literal anonymous id, and Supabase Anonymous Sign-In users.
+  if (user.role === 'anon' || user.id === 'anonymous' || user.is_anonymous === true) {
     return { ok: false, status: 401, error: 'anonymous_not_allowed' };
   }
   return { ok: true, userId: user.id };
@@ -214,6 +272,7 @@ export type RateLimitDecision = {
   allowed: boolean;
   remaining: number;
   request_count: number;
+  global_remaining?: number;
   reason?: string;
 };
 
@@ -226,16 +285,25 @@ export function interpretRateLimitResult(data: unknown): RateLimitDecision {
     allowed: row.allowed === true,
     remaining: typeof row.remaining === 'number' ? row.remaining : 0,
     request_count: typeof row.request_count === 'number' ? row.request_count : 0,
+    global_remaining: typeof row.global_remaining === 'number' ? row.global_remaining : undefined,
     reason: typeof row.reason === 'string' ? row.reason : undefined,
   };
 }
 
-/** Simulate the atomic window counter for offline tests (mirrors SQL semantics). */
-export function applyRateLimitWindow(state: {
+export type RateLimitWindowState = {
   windowStartedAtMs: number;
   requestCount: number;
-} | null, nowMs: number, maxRequests = RATE_LIMIT_MAX_REQUESTS, windowMs = RATE_LIMIT_WINDOW_SECONDS * 1000): {
-  next: { windowStartedAtMs: number; requestCount: number };
+};
+
+/** Simulate a fixed window counter (mirrors SQL per-bucket semantics). */
+export function applyRateLimitWindow(
+  state: RateLimitWindowState | null,
+  nowMs: number,
+  maxRequests: number,
+  windowMs: number,
+  blockedReason: string
+): {
+  next: RateLimitWindowState;
   decision: RateLimitDecision;
 } {
   let windowStartedAtMs = state?.windowStartedAtMs ?? nowMs;
@@ -253,7 +321,7 @@ export function applyRateLimitWindow(state: {
         allowed: false,
         remaining: 0,
         request_count: requestCount,
-        reason: 'rate_limited',
+        reason: blockedReason,
       },
     };
   }
@@ -267,4 +335,156 @@ export function applyRateLimitWindow(state: {
       request_count: requestCount,
     },
   };
+}
+
+/**
+ * Simulate combined global + per-user limits (global checked first; user block
+ * does not consume global — mirrors SQL).
+ */
+export function applyCombinedRateLimits(
+  globalState: RateLimitWindowState | null,
+  userState: RateLimitWindowState | null,
+  nowMs: number,
+  opts: {
+    userMax?: number;
+    userWindowMs?: number;
+    globalMax?: number;
+    globalWindowMs?: number;
+  } = {}
+): {
+  nextGlobal: RateLimitWindowState;
+  nextUser: RateLimitWindowState;
+  decision: RateLimitDecision;
+} {
+  const userMax = opts.userMax ?? RATE_LIMIT_MAX_REQUESTS;
+  const userWindowMs = opts.userWindowMs ?? RATE_LIMIT_WINDOW_SECONDS * 1000;
+  const globalMax = opts.globalMax ?? GLOBAL_RATE_LIMIT_MAX_REQUESTS;
+  const globalWindowMs = opts.globalWindowMs ?? GLOBAL_RATE_LIMIT_WINDOW_SECONDS * 1000;
+
+  const globalProbe = applyRateLimitWindow(
+    globalState,
+    nowMs,
+    globalMax,
+    globalWindowMs,
+    'global_rate_limited'
+  );
+  if (!globalProbe.decision.allowed) {
+    return {
+      nextGlobal: globalProbe.next,
+      nextUser: userState ?? { windowStartedAtMs: nowMs, requestCount: 0 },
+      decision: {
+        ...globalProbe.decision,
+        global_remaining: 0,
+      },
+    };
+  }
+
+  // Peek user limit without yet committing global — if user blocked, revert global consume.
+  let userWindowStartedAtMs = userState?.windowStartedAtMs ?? nowMs;
+  let userCount = userState?.requestCount ?? 0;
+  if (!userState || userWindowStartedAtMs <= nowMs - userWindowMs) {
+    userWindowStartedAtMs = nowMs;
+    userCount = 0;
+  }
+  if (userCount >= userMax) {
+    // Restore global to pre-consume state.
+    const restoredGlobal = globalState ?? { windowStartedAtMs: nowMs, requestCount: 0 };
+    let gStarted = restoredGlobal.windowStartedAtMs;
+    let gCount = restoredGlobal.requestCount;
+    if (!globalState || gStarted <= nowMs - globalWindowMs) {
+      gStarted = nowMs;
+      gCount = 0;
+    }
+    return {
+      nextGlobal: { windowStartedAtMs: gStarted, requestCount: gCount },
+      nextUser: { windowStartedAtMs: userWindowStartedAtMs, requestCount: userCount },
+      decision: {
+        allowed: false,
+        remaining: 0,
+        request_count: userCount,
+        global_remaining: Math.max(globalMax - gCount, 0),
+        reason: 'rate_limited',
+      },
+    };
+  }
+
+  userCount += 1;
+  return {
+    nextGlobal: globalProbe.next,
+    nextUser: { windowStartedAtMs: userWindowStartedAtMs, requestCount: userCount },
+    decision: {
+      allowed: true,
+      remaining: Math.max(userMax - userCount, 0),
+      request_count: userCount,
+      global_remaining: globalProbe.decision.remaining,
+    },
+  };
+}
+
+export type ExistingLookupResult =
+  | { ok: true; bySourceId: Map<string, ExistingCourtRecord> }
+  | { ok: false; error: 'lookup_failed' };
+
+/** Parse a courts select payload into an existing-record map (fail closed on bad input). */
+export function parseExistingCourtsLookup(data: unknown, error: unknown): ExistingLookupResult {
+  if (error) {
+    return { ok: false, error: 'lookup_failed' };
+  }
+  if (!Array.isArray(data)) {
+    return { ok: false, error: 'lookup_failed' };
+  }
+
+  const bySourceId = new Map<string, ExistingCourtRecord>();
+  for (const row of data) {
+    if (!row || typeof row !== 'object') continue;
+    const sourceId = (row as { source_id?: unknown }).source_id;
+    if (typeof sourceId !== 'string' || sourceId.length === 0) continue;
+    const updatedRaw = (row as { updated_at?: unknown }).updated_at;
+    let updatedAtMs: number | null = null;
+    if (typeof updatedRaw === 'string' || typeof updatedRaw === 'number') {
+      const parsed = new Date(updatedRaw).getTime();
+      updatedAtMs = Number.isFinite(parsed) ? parsed : null;
+    }
+    bySourceId.set(sourceId, { source_id: sourceId, updatedAtMs });
+  }
+  return { ok: true, bySourceId };
+}
+
+/**
+ * Fetch new IDs and stale existing IDs (older than refresh window).
+ * Fresh existing IDs are skipped to avoid repeated Overpass traffic.
+ */
+export function partitionIdentitiesForFetch(
+  identities: OsmIdentity[],
+  existing: Map<string, ExistingCourtRecord>,
+  nowMs: number,
+  refreshAfterMs: number = COURT_REFRESH_AFTER_MS
+): {
+  toFetch: OsmIdentity[];
+  skippedFresh: number;
+  refreshCount: number;
+} {
+  const toFetch: OsmIdentity[] = [];
+  let skippedFresh = 0;
+  let refreshCount = 0;
+
+  for (const identity of identities) {
+    const key = sourceIdKey(identity.type, identity.id);
+    const record = existing.get(key);
+    if (!record) {
+      toFetch.push(identity);
+      continue;
+    }
+    const updatedAtMs = record.updatedAtMs;
+    const isStale =
+      updatedAtMs == null || !Number.isFinite(updatedAtMs) || nowMs - updatedAtMs >= refreshAfterMs;
+    if (isStale) {
+      toFetch.push(identity);
+      refreshCount += 1;
+    } else {
+      skippedFresh += 1;
+    }
+  }
+
+  return { toFetch, skippedFresh, refreshCount };
 }
