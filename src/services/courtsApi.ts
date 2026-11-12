@@ -58,13 +58,51 @@ export function clampCourtsQueryLimit(limit?: number): number {
   return Math.min(Math.floor(limit), COURTS_QUERY_LIMIT_MAX);
 }
 
-/** Map a public.courts row to the app Court shape (activeGameIds filled by games layer). */
-export function mapCourtRowToCourt(row: CourtRow): Court {
+/** Overpass source_id form stored in public.courts, e.g. node/123 or way/456. */
+const OVERPASS_SOURCE_ID_RE = /^(node|way)\/(\d+)$/;
+
+/**
+ * App-facing Court.id from DB source fields.
+ * Overpass rows become osm-node-123 / osm-way-456 so games stay compatible.
+ * Returns null for blank, malformed, or unsupported ids (caller should skip).
+ */
+export function appCourtIdFromSource(source: string, sourceId: string): string | null {
+  if (typeof source !== 'string' || typeof sourceId !== 'string') return null;
+  const src = source.trim();
+  const sid = sourceId.trim();
+  if (!src || !sid) return null;
+
+  if (src === 'overpass') {
+    const match = OVERPASS_SOURCE_ID_RE.exec(sid);
+    if (!match) return null;
+    return `osm-${match[1]}-${match[2]}`;
+  }
+
+  // Non-overpass catalog rows (e.g. fallback) use source-source_id when both are safe tokens.
+  if (/^[a-z0-9_-]+$/i.test(src) && /^[a-z0-9_-]+$/i.test(sid)) {
+    return `${src}-${sid}`;
+  }
+
+  return null;
+}
+
+/**
+ * Map a public.courts row to the app Court shape (activeGameIds filled by games layer).
+ * Returns null when source/source_id cannot produce a game-compatible Court.id.
+ */
+export function mapCourtRowToCourt(row: CourtRow): Court | null {
+  const id = appCourtIdFromSource(row.source, row.source_id);
+  if (!id) return null;
+
+  const latitude = Number(row.latitude);
+  const longitude = Number(row.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+
   return {
-    id: row.id,
+    id,
     name: row.name,
-    latitude: Number(row.latitude),
-    longitude: Number(row.longitude),
+    latitude,
+    longitude,
     address: row.address?.trim() || 'Address unavailable',
     activeGameIds: [],
   };
@@ -133,6 +171,9 @@ export async function fetchCourtsInBounds(
     return { ok: false, error: friendlyCourtsError(error.message) };
   }
 
-  const courts = (data as CourtRow[] | null)?.map(mapCourtRowToCourt) ?? [];
+  const courts =
+    (data as CourtRow[] | null)
+      ?.map(mapCourtRowToCourt)
+      .filter((court): court is Court => court !== null) ?? [];
   return { ok: true, data: courts };
 }
