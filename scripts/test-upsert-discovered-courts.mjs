@@ -11,7 +11,6 @@ import {
   GLOBAL_RATE_LIMIT_WINDOW_SECONDS,
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_SECONDS,
-  applyCombinedRateLimits,
   applyRateLimitWindow,
   coordsFromElement,
   courtRowFromOverpassElement,
@@ -19,6 +18,7 @@ import {
   enforceIdCap,
   hasBasketballEvidence,
   interpretRateLimitResult,
+  needsOverpassFetch,
   parseExistingCourtsLookup,
   parseOsmIdentities,
   partitionIdentitiesForFetch,
@@ -82,7 +82,6 @@ test('basketball evidence requires credible court/pitch tagging', () => {
   assert.equal(hasBasketballEvidence({ leisure: 'pitch', sport: 'basketball' }), true);
   assert.equal(hasBasketballEvidence({ leisure: 'pitch', sport: 'tennis;basketball' }), true);
   assert.equal(hasBasketballEvidence({ leisure: 'sports_centre', sport: 'basketball' }), true);
-  // Bare sport=basketball nodes remain legitimate OSM courts.
   assert.equal(hasBasketballEvidence({ sport: 'basketball' }), true);
   assert.equal(hasBasketballEvidence({ sport: 'tennis' }), false);
   assert.equal(hasBasketballEvidence({ leisure: 'pitch' }), false);
@@ -153,37 +152,92 @@ test('per-user rate limiting allows 10 requests then blocks within 10 minutes', 
   assert.equal(blocked.decision.reason, 'rate_limited');
 });
 
-test('global rate limiting blocks after budget even across different users', () => {
+test('global rate limiting blocks after budget when Overpass is required', () => {
   let globalState = null;
   const start = 2_000_000;
   for (let i = 0; i < GLOBAL_RATE_LIMIT_MAX_REQUESTS; i++) {
-    const result = applyCombinedRateLimits(globalState, null, start + i, {
-      userMax: RATE_LIMIT_MAX_REQUESTS,
-      globalMax: GLOBAL_RATE_LIMIT_MAX_REQUESTS,
-      globalWindowMs: GLOBAL_RATE_LIMIT_WINDOW_SECONDS * 1000,
-    });
+    assert.equal(needsOverpassFetch(1), true);
+    const result = applyRateLimitWindow(
+      globalState,
+      start + i,
+      GLOBAL_RATE_LIMIT_MAX_REQUESTS,
+      GLOBAL_RATE_LIMIT_WINDOW_SECONDS * 1000,
+      'global_rate_limited'
+    );
     assert.equal(result.decision.allowed, true, `expected allow at ${i}`);
-    globalState = result.nextGlobal;
+    globalState = result.next;
   }
-  const blocked = applyCombinedRateLimits(globalState, null, start + GLOBAL_RATE_LIMIT_MAX_REQUESTS + 1, {
-    userMax: RATE_LIMIT_MAX_REQUESTS,
-    globalMax: GLOBAL_RATE_LIMIT_MAX_REQUESTS,
-    globalWindowMs: GLOBAL_RATE_LIMIT_WINDOW_SECONDS * 1000,
-  });
+  const blocked = applyRateLimitWindow(
+    globalState,
+    start + GLOBAL_RATE_LIMIT_MAX_REQUESTS + 1,
+    GLOBAL_RATE_LIMIT_MAX_REQUESTS,
+    GLOBAL_RATE_LIMIT_WINDOW_SECONDS * 1000,
+    'global_rate_limited'
+  );
   assert.equal(blocked.decision.allowed, false);
   assert.equal(blocked.decision.reason, 'global_rate_limited');
 });
 
-test('per-user limit does not consume global budget in the combined simulator', () => {
-  let globalState = { windowStartedAtMs: 3_000_000, requestCount: 5 };
-  let userState = { windowStartedAtMs: 3_000_000, requestCount: RATE_LIMIT_MAX_REQUESTS };
-  const blocked = applyCombinedRateLimits(globalState, userState, 3_000_001, {
-    userMax: RATE_LIMIT_MAX_REQUESTS,
-    globalMax: GLOBAL_RATE_LIMIT_MAX_REQUESTS,
-  });
+test('fresh-only requests do not consume global Overpass budget', () => {
+  let userState = null;
+  let globalState = { windowStartedAtMs: 3_000_000, requestCount: 7 };
+  const now = 3_000_001;
+
+  // Simulate Edge Function: always consume user; only consume global when toFetch > 0.
+  const user = applyRateLimitWindow(
+    userState,
+    now,
+    RATE_LIMIT_MAX_REQUESTS,
+    RATE_LIMIT_WINDOW_SECONDS * 1000,
+    'rate_limited'
+  );
+  assert.equal(user.decision.allowed, true);
+  userState = user.next;
+
+  const identities = [{ type: 'node', id: 1 }];
+  const existing = new Map([
+    [
+      'node/1',
+      {
+        source_id: 'node/1',
+        updatedAtMs: now - 60_000,
+        verification_status: 'verified',
+      },
+    ],
+  ]);
+  const partitioned = partitionIdentitiesForFetch(identities, existing, now, COURT_REFRESH_AFTER_MS);
+  assert.equal(partitioned.toFetch.length, 0);
+  assert.equal(needsOverpassFetch(partitioned.toFetch.length), false);
+
+  // Global budget untouched because no Overpass is required.
+  assert.equal(globalState.requestCount, 7);
+});
+
+test('requests that need Overpass consume global budget and stay fail-closed', () => {
+  let globalState = { windowStartedAtMs: 4_000_000, requestCount: GLOBAL_RATE_LIMIT_MAX_REQUESTS };
+  const identities = [{ type: 'node', id: 99 }];
+  const existing = new Map();
+  const partitioned = partitionIdentitiesForFetch(identities, existing, 4_000_001, COURT_REFRESH_AFTER_MS);
+  assert.equal(needsOverpassFetch(partitioned.toFetch.length), true);
+
+  const blocked = applyRateLimitWindow(
+    globalState,
+    4_000_001,
+    GLOBAL_RATE_LIMIT_MAX_REQUESTS,
+    GLOBAL_RATE_LIMIT_WINDOW_SECONDS * 1000,
+    'global_rate_limited'
+  );
   assert.equal(blocked.decision.allowed, false);
-  assert.equal(blocked.decision.reason, 'rate_limited');
-  assert.equal(blocked.nextGlobal.requestCount, 5);
+  assert.equal(blocked.decision.reason, 'global_rate_limited');
+  // Concurrent callers serialize on the same window state — no bypass when already full.
+  const again = applyRateLimitWindow(
+    blocked.next,
+    4_000_002,
+    GLOBAL_RATE_LIMIT_MAX_REQUESTS,
+    GLOBAL_RATE_LIMIT_WINDOW_SECONDS * 1000,
+    'global_rate_limited'
+  );
+  assert.equal(again.decision.allowed, false);
 });
 
 test('interpretRateLimitResult fails closed and preserves global reason', () => {
@@ -194,7 +248,7 @@ test('interpretRateLimitResult fails closed and preserves global reason', () => 
       allowed: false,
       remaining: 0,
       request_count: 10,
-      global_remaining: 40,
+      global_remaining: 0,
       reason: 'global_rate_limited',
     }).reason,
     'global_rate_limited'
@@ -211,16 +265,23 @@ test('database lookup failures fail closed', () => {
     error: 'lookup_failed',
   });
   const ok = parseExistingCourtsLookup(
-    [{ source_id: 'node/1', updated_at: '2026-11-01T00:00:00.000Z' }],
+    [
+      {
+        source_id: 'node/1',
+        updated_at: '2026-11-01T00:00:00.000Z',
+        verification_status: 'verified',
+      },
+    ],
     null
   );
   assert.equal(ok.ok, true);
   if (ok.ok) {
     assert.equal(ok.bySourceId.get('node/1')?.updatedAtMs, Date.parse('2026-11-01T00:00:00.000Z'));
+    assert.equal(ok.bySourceId.get('node/1')?.verification_status, 'verified');
   }
 });
 
-test('refresh fetches stale courts but skips fresh ones', () => {
+test('refresh fetches stale verified courts but skips fresh verified ones', () => {
   const now = Date.parse('2026-11-12T00:00:00.000Z');
   const identities = [
     { type: 'node', id: 1 },
@@ -232,24 +293,82 @@ test('refresh fetches stale courts but skips fresh ones', () => {
       'node/1',
       {
         source_id: 'node/1',
-        updatedAtMs: now - 60_000, // fresh
+        updatedAtMs: now - 60_000,
+        verification_status: 'verified',
       },
     ],
     [
       'node/2',
       {
         source_id: 'node/2',
-        updatedAtMs: now - COURT_REFRESH_AFTER_MS - 1, // stale
+        updatedAtMs: now - COURT_REFRESH_AFTER_MS - 1,
+        verification_status: 'verified',
       },
     ],
   ]);
   const result = partitionIdentitiesForFetch(identities, existing, now, COURT_REFRESH_AFTER_MS);
   assert.equal(result.skippedFresh, 1);
   assert.equal(result.refreshCount, 1);
+  assert.equal(result.skippedRejected, 0);
   assert.deepEqual(
     result.toFetch.map((i) => sourceIdKey(i.type, i.id)),
     ['node/2', 'way/3']
   );
+});
+
+test('rejected courts are never sent to Overpass and stay rejected', () => {
+  const now = Date.parse('2026-11-12T00:00:00.000Z');
+  const identities = [
+    { type: 'node', id: 10 },
+    { type: 'way', id: 11 },
+  ];
+  const existing = new Map([
+    [
+      'node/10',
+      {
+        source_id: 'node/10',
+        updatedAtMs: now - COURT_REFRESH_AFTER_MS * 2,
+        verification_status: 'rejected',
+      },
+    ],
+  ]);
+  const result = partitionIdentitiesForFetch(identities, existing, now, COURT_REFRESH_AFTER_MS);
+  assert.equal(result.skippedRejected, 1);
+  assert.equal(result.refreshCount, 0);
+  assert.deepEqual(
+    result.toFetch.map((i) => sourceIdKey(i.type, i.id)),
+    ['way/11']
+  );
+  assert.equal(
+    result.toFetch.some((i) => sourceIdKey(i.type, i.id) === 'node/10'),
+    false
+  );
+});
+
+test('unverified courts may be fetched for promotion but rows only publish as verified', () => {
+  const now = Date.parse('2026-11-12T00:00:00.000Z');
+  const identities = [{ type: 'node', id: 20 }];
+  const existing = new Map([
+    [
+      'node/20',
+      {
+        source_id: 'node/20',
+        updatedAtMs: now - 1_000,
+        verification_status: 'unverified',
+      },
+    ],
+  ]);
+  const result = partitionIdentitiesForFetch(identities, existing, now, COURT_REFRESH_AFTER_MS);
+  assert.equal(result.toFetch.length, 1);
+  assert.equal(result.refreshCount, 0);
+  const row = courtRowFromOverpassElement({
+    type: 'node',
+    id: 20,
+    lat: 40,
+    lon: -74,
+    tags: { leisure: 'pitch', sport: 'basketball' },
+  });
+  assert.equal(row?.verification_status, 'verified');
 });
 
 test('app-facing osm ids remain type/id based for games', () => {

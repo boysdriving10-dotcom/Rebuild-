@@ -55,10 +55,18 @@ export type CourtUpsertRow = {
   updated_at: string;
 };
 
+export type CourtVerificationStatus = 'unverified' | 'verified' | 'rejected';
+
 export type ExistingCourtRecord = {
   source_id: string;
   updatedAtMs: number | null;
+  verification_status: CourtVerificationStatus | null;
 };
+
+/** True when the partitioned fetch set requires an Overpass round-trip (and thus global budget). */
+export function needsOverpassFetch(toFetchCount: number): boolean {
+  return toFetchCount > 0;
+}
 
 export function parseOsmIdentities(input: unknown): {
   identities: OsmIdentity[];
@@ -425,6 +433,13 @@ export type ExistingLookupResult =
   | { ok: true; bySourceId: Map<string, ExistingCourtRecord> }
   | { ok: false; error: 'lookup_failed' };
 
+function parseVerificationStatus(value: unknown): CourtVerificationStatus | null {
+  if (value === 'unverified' || value === 'verified' || value === 'rejected') {
+    return value;
+  }
+  return null;
+}
+
 /** Parse a courts select payload into an existing-record map (fail closed on bad input). */
 export function parseExistingCourtsLookup(data: unknown, error: unknown): ExistingLookupResult {
   if (error) {
@@ -445,14 +460,21 @@ export function parseExistingCourtsLookup(data: unknown, error: unknown): Existi
       const parsed = new Date(updatedRaw).getTime();
       updatedAtMs = Number.isFinite(parsed) ? parsed : null;
     }
-    bySourceId.set(sourceId, { source_id: sourceId, updatedAtMs });
+    const verification_status = parseVerificationStatus(
+      (row as { verification_status?: unknown }).verification_status
+    );
+    bySourceId.set(sourceId, { source_id: sourceId, updatedAtMs, verification_status });
   }
   return { ok: true, bySourceId };
 }
 
 /**
- * Fetch new IDs and stale existing IDs (older than refresh window).
- * Fresh existing IDs are skipped to avoid repeated Overpass traffic.
+ * Decide which IDs need Overpass:
+ * - missing → fetch (new)
+ * - rejected → never fetch / never upsert (preserve rejection)
+ * - verified + fresh → skip
+ * - verified + stale → refresh fetch
+ * - unverified → fetch so Overpass can promote to verified (never weaken)
  */
 export function partitionIdentitiesForFetch(
   identities: OsmIdentity[],
@@ -462,10 +484,12 @@ export function partitionIdentitiesForFetch(
 ): {
   toFetch: OsmIdentity[];
   skippedFresh: number;
+  skippedRejected: number;
   refreshCount: number;
 } {
   const toFetch: OsmIdentity[] = [];
   let skippedFresh = 0;
+  let skippedRejected = 0;
   let refreshCount = 0;
 
   for (const identity of identities) {
@@ -475,6 +499,19 @@ export function partitionIdentitiesForFetch(
       toFetch.push(identity);
       continue;
     }
+
+    if (record.verification_status === 'rejected') {
+      skippedRejected += 1;
+      continue;
+    }
+
+    if (record.verification_status === 'unverified' || record.verification_status == null) {
+      // Allow Overpass to strengthen unverified → verified; never write a weaker status.
+      toFetch.push(identity);
+      continue;
+    }
+
+    // verified (or unexpected status treated cautiously via updated_at freshness)
     const updatedAtMs = record.updatedAtMs;
     const isStale =
       updatedAtMs == null || !Number.isFinite(updatedAtMs) || nowMs - updatedAtMs >= refreshAfterMs;
@@ -486,5 +523,5 @@ export function partitionIdentitiesForFetch(
     }
   }
 
-  return { toFetch, skippedFresh, refreshCount };
+  return { toFetch, skippedFresh, skippedRejected, refreshCount };
 }

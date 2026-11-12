@@ -20,6 +20,7 @@ import {
   decideUserAuth,
   enforceIdCap,
   interpretRateLimitResult,
+  needsOverpassFetch,
   parseExistingCourtsLookup,
   parseOsmIdentities,
   partitionIdentitiesForFetch,
@@ -72,14 +73,13 @@ Deno.serve(async (request) => {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
-    const rateRpc = await serviceClient.rpc('consume_court_ingest_rate_limit', {
+    // Per-user limit always applies (including fresh-only requests).
+    const userRateRpc = await serviceClient.rpc('consume_court_ingest_user_rate_limit', {
       p_user_id: auth.userId,
       p_max_requests: RATE_LIMIT_MAX_REQUESTS,
       p_window_seconds: RATE_LIMIT_WINDOW_SECONDS,
-      p_global_max_requests: GLOBAL_RATE_LIMIT_MAX_REQUESTS,
-      p_global_window_seconds: GLOBAL_RATE_LIMIT_WINDOW_SECONDS,
     });
-    if (rateRpc.error) {
+    if (userRateRpc.error) {
       return json(
         {
           ok: false,
@@ -91,19 +91,16 @@ Deno.serve(async (request) => {
         503
       );
     }
-    const rate = interpretRateLimitResult(rateRpc.data);
-    if (!rate.allowed) {
-      const error =
-        rate.reason === 'global_rate_limited' ? 'global_rate_limited' : 'rate_limited';
+    const userRate = interpretRateLimitResult(userRateRpc.data);
+    if (!userRate.allowed) {
       return json(
         {
           ok: false,
-          error,
+          error: 'rate_limited',
           inserted: 0,
           skipped: 0,
           rejected: 0,
-          remaining: rate.remaining,
-          global_remaining: rate.global_remaining ?? 0,
+          remaining: userRate.remaining,
         },
         429
       );
@@ -136,8 +133,7 @@ Deno.serve(async (request) => {
         skipped: 0,
         rejected,
         refreshed: 0,
-        remaining: rate.remaining,
-        global_remaining: rate.global_remaining ?? 0,
+        remaining: userRate.remaining,
       });
     }
 
@@ -150,8 +146,7 @@ Deno.serve(async (request) => {
           inserted: 0,
           skipped: 0,
           rejected: 0,
-          remaining: rate.remaining,
-          global_remaining: rate.global_remaining ?? 0,
+          remaining: userRate.remaining,
         },
         503
       );
@@ -162,19 +157,53 @@ Deno.serve(async (request) => {
       existingLookup.bySourceId,
       Date.now()
     );
-    skipped += partitioned.skippedFresh;
+    skipped += partitioned.skippedFresh + partitioned.skippedRejected;
     const toFetch = partitioned.toFetch;
 
-    if (toFetch.length === 0) {
+    if (!needsOverpassFetch(toFetch.length)) {
+      // Fresh-only / rejected-only: no Overpass, so do not consume global budget.
       return json({
         ok: true,
         inserted: 0,
         skipped,
         rejected,
         refreshed: 0,
-        remaining: rate.remaining,
-        global_remaining: rate.global_remaining ?? 0,
+        remaining: userRate.remaining,
       });
+    }
+
+    // Global Overpass budget — atomic FOR UPDATE; fail closed before any fetch.
+    const globalRateRpc = await serviceClient.rpc('consume_court_ingest_global_rate_limit', {
+      p_max_requests: GLOBAL_RATE_LIMIT_MAX_REQUESTS,
+      p_window_seconds: GLOBAL_RATE_LIMIT_WINDOW_SECONDS,
+    });
+    if (globalRateRpc.error) {
+      return json(
+        {
+          ok: false,
+          error: 'rate_limit_unavailable',
+          inserted: 0,
+          skipped,
+          rejected,
+          remaining: userRate.remaining,
+        },
+        503
+      );
+    }
+    const globalRate = interpretRateLimitResult(globalRateRpc.data);
+    if (!globalRate.allowed) {
+      return json(
+        {
+          ok: false,
+          error: 'global_rate_limited',
+          inserted: 0,
+          skipped,
+          rejected,
+          remaining: userRate.remaining,
+          global_remaining: globalRate.global_remaining ?? 0,
+        },
+        429
+      );
     }
 
     const overpass = await fetchOverpassElements(toFetch);
@@ -187,8 +216,8 @@ Deno.serve(async (request) => {
         rejected: rejected + toFetch.length,
         refreshed: 0,
         overpass_error: overpass.error,
-        remaining: rate.remaining,
-        global_remaining: rate.global_remaining ?? 0,
+        remaining: userRate.remaining,
+        global_remaining: globalRate.global_remaining ?? 0,
       });
     }
 
@@ -197,6 +226,12 @@ Deno.serve(async (request) => {
     const seenFetched = new Set<string>();
     for (const identity of toFetch) {
       const key = sourceIdKey(identity.type, identity.id);
+      // Belt-and-suspenders: never upsert a previously rejected court.
+      const existing = existingLookup.bySourceId.get(key);
+      if (existing?.verification_status === 'rejected') {
+        skipped += 1;
+        continue;
+      }
       const el = overpass.byKey.get(key);
       if (!el) {
         rejected += 1;
@@ -212,7 +247,7 @@ Deno.serve(async (request) => {
         continue;
       }
       seenFetched.add(row.source_id);
-      if (existingLookup.bySourceId.has(row.source_id)) {
+      if (existing?.verification_status === 'verified') {
         refreshed += 1;
       }
       rows.push(row);
@@ -232,8 +267,8 @@ Deno.serve(async (request) => {
             skipped,
             rejected,
             refreshed: 0,
-            remaining: rate.remaining,
-            global_remaining: rate.global_remaining ?? 0,
+            remaining: userRate.remaining,
+            global_remaining: globalRate.global_remaining ?? 0,
           },
           500
         );
@@ -247,8 +282,8 @@ Deno.serve(async (request) => {
       skipped,
       rejected,
       refreshed,
-      remaining: rate.remaining,
-      global_remaining: rate.global_remaining ?? 0,
+      remaining: userRate.remaining,
+      global_remaining: globalRate.global_remaining ?? 0,
     });
   } catch {
     return json({ ok: false, error: 'internal_error', inserted: 0, skipped: 0, rejected: 0 }, 500);
@@ -262,7 +297,7 @@ async function loadExistingCourts(
   const keys = identities.map((i) => sourceIdKey(i.type, i.id));
   const { data, error } = await serviceClient
     .from('courts')
-    .select('source_id, updated_at')
+    .select('source_id, updated_at, verification_status')
     .eq('source', 'overpass')
     .in('source_id', keys);
   return parseExistingCourtsLookup(data, error);
