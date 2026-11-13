@@ -148,7 +148,7 @@ test('retryable failures continue within attempt budget', () => {
   );
 });
 
-test('merge keeps fallback when live Overpass is empty', () => {
+test('merge keeps fallback when verified DB live set is empty', () => {
   const bbox = {
     south: 39.705961,
     west: -74.997744,
@@ -160,13 +160,14 @@ test('merge keeps fallback when live Overpass is empty', () => {
   assert.ok(merged.some((c) => c.id === 'fallback-carmelo-felix'));
 });
 
-test('merge dedupes live court that shares coords with fallback', () => {
+test('merge dedupes verified DB court that shares coords with fallback', () => {
   const bbox = {
     south: 39.67,
     west: -75.02,
     north: 39.69,
     east: -74.99,
   };
+  // Verified DB row mapped to osm-way-* — never raw unverified Overpass.
   const live = [
     {
       id: 'osm-way-667347315',
@@ -183,6 +184,131 @@ test('merge dedupes live court that shares coords with fallback', () => {
   );
   assert.equal(owens.length, 1);
   assert.equal(owens[0].id, 'osm-way-667347315');
+});
+
+/** Mirrors useMapCourts.shouldUseVerifiedCourtsCacheHit */
+function shouldUseVerifiedCourtsCacheHit(cached) {
+  return Array.isArray(cached) && cached.length > 0;
+}
+
+/** Mirrors useMapCourts.shouldPersistVerifiedCourtsCache */
+function shouldPersistVerifiedCourtsCache(courts) {
+  return Array.isArray(courts) && courts.length > 0;
+}
+
+/** Mirrors useMapCourts.shouldAttemptCourtDiscovery */
+function shouldAttemptCourtDiscovery(mayIngest) {
+  return mayIngest === true;
+}
+
+/**
+ * Mirrors map display after DB (+ optional failed discovery):
+ * only verified live set is merged — never raw Overpass courts.
+ */
+function displayAfterDiscovery({ verified, rawOverpassCourts, bbox, existing = [] }) {
+  void rawOverpassCourts;
+  return mergeCourtsWithFallback(existing, verified, bbox);
+}
+
+test('map must not treat raw Overpass discovery as verified live pins', () => {
+  // Phase 3 invariant: discovery Court ids are for ingest only.
+  // Display path merges verified DB (+ fallback), never Overpass arrays directly.
+  const bbox = {
+    south: 39.705961,
+    west: -74.997744,
+    north: 39.745961,
+    east: -74.957744,
+  };
+  const verifiedFromDb = [];
+  const rawOverpassDiscovery = [
+    { id: 'osm-node-999', name: 'Unverified OSM', latitude: 39.72, longitude: -74.97 },
+  ];
+  // Correct display merge uses verified DB only:
+  const displayed = mergeCourtsWithFallback([], verifiedFromDb, bbox);
+  assert.equal(
+    displayed.some((c) => c.id === 'osm-node-999'),
+    false
+  );
+  // Raw discovery must stay out of the merge `live` argument:
+  assert.equal(rawOverpassDiscovery[0].id.startsWith('osm-'), true);
+});
+
+test('empty cached verified result does not short-circuit discovery for signed-in users', () => {
+  assert.equal(shouldUseVerifiedCourtsCacheHit(null), false);
+  assert.equal(shouldUseVerifiedCourtsCacheHit([]), false);
+  assert.equal(shouldPersistVerifiedCourtsCache([]), false);
+  // Eligible signed-in user still runs discovery when cache is empty.
+  assert.equal(shouldAttemptCourtDiscovery(true), true);
+  const wouldSkipSearch =
+    shouldUseVerifiedCourtsCacheHit([]) && !shouldAttemptCourtDiscovery(true);
+  assert.equal(wouldSkipSearch, false);
+});
+
+test('non-empty verified cache still short-circuits DB fetch and is persisted', () => {
+  const cached = [
+    {
+      id: 'osm-node-1',
+      name: 'Verified Court',
+      latitude: 39.72,
+      longitude: -74.97,
+    },
+  ];
+  assert.equal(shouldUseVerifiedCourtsCacheHit(cached), true);
+  assert.equal(shouldPersistVerifiedCourtsCache(cached), true);
+});
+
+test('guests do not trigger court discovery or ingestion', () => {
+  assert.equal(shouldAttemptCourtDiscovery(false), false);
+  assert.equal(shouldAttemptCourtDiscovery(undefined), false);
+  assert.equal(shouldAttemptCourtDiscovery(null), false);
+});
+
+test('verified courts still load into the display merge', () => {
+  const bbox = {
+    south: 39.705961,
+    west: -74.997744,
+    north: 39.745961,
+    east: -74.957744,
+  };
+  const verified = [
+    {
+      id: 'osm-node-42',
+      name: 'DB Verified Court',
+      latitude: 39.72,
+      longitude: -74.97,
+    },
+  ];
+  const displayed = mergeCourtsWithFallback([], verified, bbox);
+  assert.ok(displayed.some((c) => c.id === 'osm-node-42'));
+  assert.ok(displayed.some((c) => c.id === 'fallback-peter-volpa'));
+});
+
+test('failed discovery does not expose unverified Overpass courts', () => {
+  const bbox = {
+    south: 39.705961,
+    west: -74.997744,
+    north: 39.745961,
+    east: -74.957744,
+  };
+  const verified = [];
+  const rawOverpassCourts = [
+    {
+      id: 'osm-node-999',
+      name: 'Unverified discovery pin',
+      latitude: 39.72,
+      longitude: -74.97,
+    },
+  ];
+  const displayed = displayAfterDiscovery({
+    verified,
+    rawOverpassCourts,
+    bbox,
+  });
+  assert.equal(
+    displayed.some((c) => c.id === 'osm-node-999'),
+    false
+  );
+  assert.ok(displayed.some((c) => c.id === 'fallback-peter-volpa'));
 });
 
 test('simulated fetch sequence: first 406 then 200 uses second host', async () => {

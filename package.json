@@ -49,7 +49,8 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "test:courts": "node --test scripts/test-courts-api.mjs",
-    "test:court-loading": "node --test scripts/test-court-loading.mjs"
+    "test:court-loading": "node --test scripts/test-court-loading.mjs",
+    "test:upsert-courts": "node --experimental-strip-types --test scripts/test-upsert-discovered-courts.mjs"
   },
   "private": true
 }

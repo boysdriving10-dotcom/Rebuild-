@@ -25,12 +25,42 @@ function clampCourtsQueryLimit(limit) {
   return Math.min(Math.floor(limit), COURTS_QUERY_LIMIT_MAX);
 }
 
+const OVERPASS_SOURCE_ID_RE = /^(node|way)\/(\d+)$/;
+
+/** Mirrors courtsApi.appCourtIdFromSource */
+function appCourtIdFromSource(source, sourceId) {
+  if (typeof source !== 'string' || typeof sourceId !== 'string') return null;
+  const src = source.trim();
+  const sid = sourceId.trim();
+  if (!src || !sid) return null;
+
+  if (src === 'overpass') {
+    const match = OVERPASS_SOURCE_ID_RE.exec(sid);
+    if (!match) return null;
+    return `osm-${match[1]}-${match[2]}`;
+  }
+
+  if (/^[a-z0-9_-]+$/i.test(src) && /^[a-z0-9_-]+$/i.test(sid)) {
+    return `${src}-${sid}`;
+  }
+
+  return null;
+}
+
+/** Mirrors courtsApi.mapCourtRowToCourt */
 function mapCourtRowToCourt(row) {
+  const id = appCourtIdFromSource(row.source, row.source_id);
+  if (!id) return null;
+
+  const latitude = Number(row.latitude);
+  const longitude = Number(row.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+
   return {
-    id: row.id,
+    id,
     name: row.name,
-    latitude: Number(row.latitude),
-    longitude: Number(row.longitude),
+    latitude,
+    longitude,
     address: row.address?.trim() || 'Address unavailable',
     activeGameIds: [],
   };
@@ -166,10 +196,10 @@ test('isValidCourtBBox rejects inverted or non-finite bounds', () => {
   );
 });
 
-test('mapCourtRowToCourt matches the existing Court model', () => {
+test('mapCourtRowToCourt matches the existing Court model for fallback rows', () => {
   const court = mapCourtRowToCourt(SAMPLE_ROWS[0]);
   assert.deepEqual(court, {
-    id: '11111111-1111-1111-1111-111111111111',
+    id: 'fallback-owens-park',
     name: 'Owens Park Basketball Court',
     latitude: 39.678688,
     longitude: -75.01237,
@@ -181,7 +211,120 @@ test('mapCourtRowToCourt matches the existing Court model', () => {
 test('mapCourtRowToCourt fills missing address', () => {
   const court = mapCourtRowToCourt(SAMPLE_ROWS[2]);
   assert.equal(court.address, 'Address unavailable');
+  assert.equal(court.id, 'manual-draft-1');
   assert.deepEqual(court.activeGameIds, []);
+});
+
+test('overpass node source_id maps to osm-node-* Court.id', () => {
+  assert.equal(appCourtIdFromSource('overpass', 'node/123'), 'osm-node-123');
+  const court = mapCourtRowToCourt({
+    id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    name: 'OSM Node Court',
+    latitude: 39.7,
+    longitude: -75.0,
+    address: 'Some St',
+    city: null,
+    region: null,
+    country: null,
+    source: 'overpass',
+    source_id: 'node/123',
+    verification_status: 'verified',
+  });
+  assert.equal(court.id, 'osm-node-123');
+  assert.equal(court.name, 'OSM Node Court');
+  assert.equal(court.latitude, 39.7);
+  assert.equal(court.longitude, -75.0);
+  assert.equal(court.address, 'Some St');
+  assert.deepEqual(court.activeGameIds, []);
+});
+
+test('overpass way source_id maps to osm-way-* Court.id', () => {
+  assert.equal(appCourtIdFromSource('overpass', 'way/456'), 'osm-way-456');
+  const court = mapCourtRowToCourt({
+    id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    name: 'OSM Way Court',
+    latitude: 40.1,
+    longitude: -74.9,
+    address: null,
+    city: 'Camden',
+    region: 'NJ',
+    country: 'US',
+    source: 'overpass',
+    source_id: 'way/456',
+    verification_status: 'verified',
+  });
+  assert.equal(court.id, 'osm-way-456');
+  assert.equal(court.address, 'Address unavailable');
+  assert.equal(court.name, 'OSM Way Court');
+});
+
+test('malformed or unsupported source ids are skipped safely', () => {
+  assert.equal(appCourtIdFromSource('overpass', 'relation/9'), null);
+  assert.equal(appCourtIdFromSource('overpass', 'node/'), null);
+  assert.equal(appCourtIdFromSource('overpass', 'node/abc'), null);
+  assert.equal(appCourtIdFromSource('overpass', 'NODE/123'), null);
+  assert.equal(appCourtIdFromSource('overpass', '  '), null);
+  assert.equal(appCourtIdFromSource('', 'node/123'), null);
+  assert.equal(
+    mapCourtRowToCourt({
+      id: 'cccccccc-cccc-cccc-cccc-cccccccccccc',
+      name: 'Bad OSM',
+      latitude: 39.7,
+      longitude: -75.0,
+      address: null,
+      city: null,
+      region: null,
+      country: null,
+      source: 'overpass',
+      source_id: 'node/12a',
+      verification_status: 'verified',
+    }),
+    null
+  );
+  assert.equal(
+    mapCourtRowToCourt({
+      id: 'dddddddd-dddd-dddd-dddd-dddddddddddd',
+      name: 'Bad coords',
+      latitude: Number.NaN,
+      longitude: -75.0,
+      address: null,
+      city: null,
+      region: null,
+      country: null,
+      source: 'overpass',
+      source_id: 'node/1',
+      verification_status: 'verified',
+    }),
+    null
+  );
+});
+
+test('mapper keeps supported database fields on the Court model only', () => {
+  const court = mapCourtRowToCourt({
+    id: 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee',
+    name: 'Named Court',
+    latitude: 39.71,
+    longitude: -74.99,
+    address: '  1 Main St  ',
+    city: 'Williamstown',
+    region: 'NJ',
+    country: 'US',
+    source: 'overpass',
+    source_id: 'way/999',
+    verification_status: 'verified',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-02T00:00:00Z',
+  });
+  assert.deepEqual(Object.keys(court).sort(), [
+    'activeGameIds',
+    'address',
+    'id',
+    'latitude',
+    'longitude',
+    'name',
+  ]);
+  assert.equal(court.id, 'osm-way-999');
+  assert.equal(court.address, '1 Main St');
 });
 
 test('default verifiedOnly excludes unverified and rejected rows in bbox', () => {
@@ -235,4 +378,80 @@ test('bbox filter respects the clamped limit', () => {
   assert.equal(hits.length, 3);
   const capped = filterCourtsInBounds(many, SICKLERVILLE_BBOX, { limit: 9999 });
   assert.equal(capped.length, 10);
+});
+
+const OSM_COURT_ID_RE = /^osm-(node|way)-(\d+)$/;
+const DISCOVERED_COURT_ID_CAP = 40;
+
+/** Mirrors courtsApi.parseOsmCourtId */
+function parseOsmCourtId(courtId) {
+  if (typeof courtId !== 'string') return null;
+  const match = OSM_COURT_ID_RE.exec(courtId.trim());
+  if (!match) return null;
+  const id = Number(match[2]);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  return { type: match[1], id };
+}
+
+/** Mirrors courtsApi.osmIdentitiesForIngest */
+function osmIdentitiesForIngest(discoveredCourtIds, alreadyKnownIds) {
+  const known = new Set(alreadyKnownIds ?? []);
+  const seen = new Set();
+  const out = [];
+
+  for (const courtId of discoveredCourtIds) {
+    if (known.has(courtId)) continue;
+    const parsed = parseOsmCourtId(courtId);
+    if (!parsed) continue;
+    const key = `${parsed.type}/${parsed.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(parsed);
+    if (out.length >= DISCOVERED_COURT_ID_CAP) break;
+  }
+
+  return out;
+}
+
+test('parseOsmCourtId accepts osm-node/way app ids only', () => {
+  assert.deepEqual(parseOsmCourtId('osm-node-123'), { type: 'node', id: 123 });
+  assert.deepEqual(parseOsmCourtId('osm-way-456'), { type: 'way', id: 456 });
+  assert.equal(parseOsmCourtId('fallback-owens-park'), null);
+  assert.equal(parseOsmCourtId('osm-relation-1'), null);
+  assert.equal(parseOsmCourtId('osm-node-'), null);
+  assert.equal(parseOsmCourtId('osm-node-abc'), null);
+  assert.equal(parseOsmCourtId('node/123'), null);
+});
+
+test('osmIdentitiesForIngest skips known verified ids and non-OSM ids', () => {
+  const identities = osmIdentitiesForIngest(
+    [
+      'osm-node-1',
+      'osm-way-2',
+      'osm-node-1',
+      'fallback-owens-park',
+      'osm-node-3',
+    ],
+    ['osm-node-1', 'osm-way-9']
+  );
+  assert.deepEqual(identities, [
+    { type: 'way', id: 2 },
+    { type: 'node', id: 3 },
+  ]);
+});
+
+test('osmIdentitiesForIngest caps at 40 ids for the Edge Function', () => {
+  const ids = Array.from({ length: 50 }, (_, i) => `osm-node-${i + 1}`);
+  const identities = osmIdentitiesForIngest(ids);
+  assert.equal(identities.length, 40);
+  assert.equal(identities[0].id, 1);
+  assert.equal(identities[39].id, 40);
+});
+
+test('guest browse path never needs ingest when discovery ids are empty or known', () => {
+  assert.deepEqual(osmIdentitiesForIngest([], ['osm-node-1']), []);
+  assert.deepEqual(
+    osmIdentitiesForIngest(['osm-node-1'], ['osm-node-1']),
+    []
+  );
 });
