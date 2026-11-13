@@ -40,6 +40,31 @@ type VerifiedCacheEntry = {
 /** Memory cache for verified DB courts only — never store raw Overpass pins here. */
 const verifiedCourtsCache = new Map<string, VerifiedCacheEntry>();
 
+/**
+ * Non-empty verified cache may short-circuit the DB fetch.
+ * Empty `[]` must NOT short-circuit — signed-in users still need Overpass discovery.
+ * Exported for regression tests (keep in sync with runSearch).
+ */
+export function shouldUseVerifiedCourtsCacheHit(cached: Court[] | null): boolean {
+  return Array.isArray(cached) && cached.length > 0;
+}
+
+/**
+ * Only non-empty verified DB results are stored in the memory cache.
+ * Exported for regression tests (keep in sync with setCachedVerifiedCourts).
+ */
+export function shouldPersistVerifiedCourtsCache(courts: Court[]): boolean {
+  return Array.isArray(courts) && courts.length > 0;
+}
+
+/**
+ * Guests / signed-out / anonymous must not run Overpass discovery or ingestion.
+ * Exported for regression tests.
+ */
+export function shouldAttemptCourtDiscovery(mayIngest: boolean): boolean {
+  return mayIngest === true;
+}
+
 function getCachedVerifiedCourts(region: Region): Court[] | null {
   const key = getBoundsCacheKey(regionToBBox(region));
   const entry = verifiedCourtsCache.get(key);
@@ -48,11 +73,21 @@ function getCachedVerifiedCourts(region: Region): Court[] | null {
     verifiedCourtsCache.delete(key);
     return null;
   }
+  // Treat stale empty entries as a miss (defense in depth if an older build cached []).
+  if (!shouldUseVerifiedCourtsCacheHit(entry.courts)) {
+    verifiedCourtsCache.delete(key);
+    return null;
+  }
   return entry.courts;
 }
 
 function setCachedVerifiedCourts(region: Region, courts: Court[]) {
   const key = getBoundsCacheKey(regionToBBox(region));
+  // Never cache empty verified results — that blocked signed-in discovery (Phase 3 review).
+  if (!shouldPersistVerifiedCourtsCache(courts)) {
+    verifiedCourtsCache.delete(key);
+    return;
+  }
   verifiedCourtsCache.set(key, { courts, savedAt: Date.now() });
 }
 
@@ -135,10 +170,11 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
     }
 
     // Retry (`force`) must hit the network — do not short-circuit on memory cache.
+    // Non-empty verified cache only — empty must not block signed-in discovery/ingest.
     const cached = !opts?.force ? getCachedVerifiedCourts(region) : null;
-    if (cached) {
+    if (shouldUseVerifiedCourtsCacheHit(cached)) {
       const bbox = regionToBBox(region);
-      const next = mergeCourtsWithFallback([], cached, bbox);
+      const next = mergeCourtsWithFallback([], cached as Court[], bbox);
       courtsRef.current = next;
       setCourts(next);
       setError(null);
@@ -222,7 +258,11 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
     if (!controller.signal.aborted && searchId === searchIdRef.current) {
       const mayIngest = await canIngestDiscoveredCourts();
 
-      if (mayIngest && !controller.signal.aborted && searchId === searchIdRef.current) {
+      if (
+        shouldAttemptCourtDiscovery(mayIngest) &&
+        !controller.signal.aborted &&
+        searchId === searchIdRef.current
+      ) {
         const discovery = await fetchCourtsInRegion(region, {
           signal: controller.signal,
           force: opts?.force,
