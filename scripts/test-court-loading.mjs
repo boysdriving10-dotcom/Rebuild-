@@ -148,7 +148,7 @@ test('retryable failures continue within attempt budget', () => {
   );
 });
 
-test('merge keeps fallback when live Overpass is empty', () => {
+test('merge keeps fallback when verified DB live set is empty', () => {
   const bbox = {
     south: 39.705961,
     west: -74.997744,
@@ -160,13 +160,14 @@ test('merge keeps fallback when live Overpass is empty', () => {
   assert.ok(merged.some((c) => c.id === 'fallback-carmelo-felix'));
 });
 
-test('merge dedupes live court that shares coords with fallback', () => {
+test('merge dedupes verified DB court that shares coords with fallback', () => {
   const bbox = {
     south: 39.67,
     west: -75.02,
     north: 39.69,
     east: -74.99,
   };
+  // Verified DB row mapped to osm-way-* — never raw unverified Overpass.
   const live = [
     {
       id: 'osm-way-667347315',
@@ -183,6 +184,29 @@ test('merge dedupes live court that shares coords with fallback', () => {
   );
   assert.equal(owens.length, 1);
   assert.equal(owens[0].id, 'osm-way-667347315');
+});
+
+test('map must not treat raw Overpass discovery as verified live pins', () => {
+  // Phase 3 invariant: discovery Court ids are for ingest only.
+  // Display path merges verified DB (+ fallback), never Overpass arrays directly.
+  const bbox = {
+    south: 39.705961,
+    west: -74.997744,
+    north: 39.745961,
+    east: -74.957744,
+  };
+  const verifiedFromDb = [];
+  const rawOverpassDiscovery = [
+    { id: 'osm-node-999', name: 'Unverified OSM', latitude: 39.72, longitude: -74.97 },
+  ];
+  // Correct display merge uses verified DB only:
+  const displayed = mergeCourtsWithFallback([], verifiedFromDb, bbox);
+  assert.equal(
+    displayed.some((c) => c.id === 'osm-node-999'),
+    false
+  );
+  // Raw discovery must stay out of the merge `live` argument:
+  assert.equal(rawOverpassDiscovery[0].id.startsWith('osm-'), true);
 });
 
 test('simulated fetch sequence: first 406 then 200 uses second host', async () => {

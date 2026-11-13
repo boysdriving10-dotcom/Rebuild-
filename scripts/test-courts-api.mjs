@@ -379,3 +379,79 @@ test('bbox filter respects the clamped limit', () => {
   const capped = filterCourtsInBounds(many, SICKLERVILLE_BBOX, { limit: 9999 });
   assert.equal(capped.length, 10);
 });
+
+const OSM_COURT_ID_RE = /^osm-(node|way)-(\d+)$/;
+const DISCOVERED_COURT_ID_CAP = 40;
+
+/** Mirrors courtsApi.parseOsmCourtId */
+function parseOsmCourtId(courtId) {
+  if (typeof courtId !== 'string') return null;
+  const match = OSM_COURT_ID_RE.exec(courtId.trim());
+  if (!match) return null;
+  const id = Number(match[2]);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  return { type: match[1], id };
+}
+
+/** Mirrors courtsApi.osmIdentitiesForIngest */
+function osmIdentitiesForIngest(discoveredCourtIds, alreadyKnownIds) {
+  const known = new Set(alreadyKnownIds ?? []);
+  const seen = new Set();
+  const out = [];
+
+  for (const courtId of discoveredCourtIds) {
+    if (known.has(courtId)) continue;
+    const parsed = parseOsmCourtId(courtId);
+    if (!parsed) continue;
+    const key = `${parsed.type}/${parsed.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(parsed);
+    if (out.length >= DISCOVERED_COURT_ID_CAP) break;
+  }
+
+  return out;
+}
+
+test('parseOsmCourtId accepts osm-node/way app ids only', () => {
+  assert.deepEqual(parseOsmCourtId('osm-node-123'), { type: 'node', id: 123 });
+  assert.deepEqual(parseOsmCourtId('osm-way-456'), { type: 'way', id: 456 });
+  assert.equal(parseOsmCourtId('fallback-owens-park'), null);
+  assert.equal(parseOsmCourtId('osm-relation-1'), null);
+  assert.equal(parseOsmCourtId('osm-node-'), null);
+  assert.equal(parseOsmCourtId('osm-node-abc'), null);
+  assert.equal(parseOsmCourtId('node/123'), null);
+});
+
+test('osmIdentitiesForIngest skips known verified ids and non-OSM ids', () => {
+  const identities = osmIdentitiesForIngest(
+    [
+      'osm-node-1',
+      'osm-way-2',
+      'osm-node-1',
+      'fallback-owens-park',
+      'osm-node-3',
+    ],
+    ['osm-node-1', 'osm-way-9']
+  );
+  assert.deepEqual(identities, [
+    { type: 'way', id: 2 },
+    { type: 'node', id: 3 },
+  ]);
+});
+
+test('osmIdentitiesForIngest caps at 40 ids for the Edge Function', () => {
+  const ids = Array.from({ length: 50 }, (_, i) => `osm-node-${i + 1}`);
+  const identities = osmIdentitiesForIngest(ids);
+  assert.equal(identities.length, 40);
+  assert.equal(identities[0].id, 1);
+  assert.equal(identities[39].id, 40);
+});
+
+test('guest browse path never needs ingest when discovery ids are empty or known', () => {
+  assert.deepEqual(osmIdentitiesForIngest([], ['osm-node-1']), []);
+  assert.deepEqual(
+    osmIdentitiesForIngest(['osm-node-1'], ['osm-node-1']),
+    []
+  );
+});

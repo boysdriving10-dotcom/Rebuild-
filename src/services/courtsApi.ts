@@ -130,8 +130,8 @@ export type FetchCourtsInBoundsOptions = {
 };
 
 /**
- * Fetch courts whose coordinates fall inside the visible map bounds.
- * Not wired into useMapCourts yet — Overpass remains the live map source.
+ * Fetch verified courts whose coordinates fall inside the visible map bounds.
+ * Primary map source — Overpass is discovery-only and must not be shown as verified.
  */
 export async function fetchCourtsInBounds(
   bbox: CourtBBox,
@@ -176,4 +176,141 @@ export async function fetchCourtsInBounds(
       ?.map(mapCourtRowToCourt)
       .filter((court): court is Court => court !== null) ?? [];
   return { ok: true, data: courts };
+}
+
+/** App Court.id form produced by Overpass / DB mapper, e.g. osm-node-123. */
+const OSM_COURT_ID_RE = /^osm-(node|way)-(\d+)$/;
+
+export type OsmCourtIdentity = { type: 'node' | 'way'; id: number };
+
+/**
+ * Parse an app Court.id back to an OSM identity for the ingest Edge Function.
+ * Returns null for fallback/manual/malformed ids — never invents identities.
+ */
+export function parseOsmCourtId(courtId: string): OsmCourtIdentity | null {
+  if (typeof courtId !== 'string') return null;
+  const match = OSM_COURT_ID_RE.exec(courtId.trim());
+  if (!match) return null;
+  const id = Number(match[2]);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  return { type: match[1] as 'node' | 'way', id };
+}
+
+/** Cap matches the Edge Function MAX_OSM_IDS_PER_REQUEST. */
+export const DISCOVERED_COURT_ID_CAP = 40;
+
+/**
+ * Extract unique OSM node/way identities from Overpass discovery Court ids.
+ * Skips ids already present in `alreadyKnownIds` (typically verified DB pins).
+ */
+export function osmIdentitiesForIngest(
+  discoveredCourtIds: string[],
+  alreadyKnownIds?: Iterable<string>
+): OsmCourtIdentity[] {
+  const known = new Set(alreadyKnownIds ?? []);
+  const seen = new Set<string>();
+  const out: OsmCourtIdentity[] = [];
+
+  for (const courtId of discoveredCourtIds) {
+    if (known.has(courtId)) continue;
+    const parsed = parseOsmCourtId(courtId);
+    if (!parsed) continue;
+    const key = `${parsed.type}/${parsed.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(parsed);
+    if (out.length >= DISCOVERED_COURT_ID_CAP) break;
+  }
+
+  return out;
+}
+
+/**
+ * True when the current session may call upsert-discovered-courts:
+ * configured Supabase, signed-in, and not an anonymous user.
+ * Guests / signed-out / anonymous must browse verified courts only.
+ */
+export async function canIngestDiscoveredCourts(): Promise<boolean> {
+  if (!isSupabaseConfigured) return false;
+
+  const {
+    data: { user },
+    error,
+  } = await supabase.auth.getUser();
+
+  if (error || !user) return false;
+  if (user.is_anonymous === true) return false;
+  return true;
+}
+
+export type UpsertDiscoveredCourtsData = {
+  inserted: number;
+  skipped: number;
+  rejected: number;
+  refreshed?: number;
+  remaining?: number;
+};
+
+/**
+ * Send OSM identities only to the upsert-discovered-courts Edge Function.
+ * Never writes to public.courts from the client. No-ops for guests/anonymous.
+ */
+export async function upsertDiscoveredCourtIds(
+  elements: OsmCourtIdentity[]
+): Promise<CourtsApiResult<UpsertDiscoveredCourtsData>> {
+  if (!isSupabaseConfigured) {
+    return {
+      ok: false,
+      error: 'Courts are not configured. Add your Supabase URL and anon key to the .env file.',
+    };
+  }
+
+  const allowed = await canIngestDiscoveredCourts();
+  if (!allowed) {
+    return { ok: false, error: 'Sign in required to discover courts.' };
+  }
+
+  if (!Array.isArray(elements) || elements.length === 0) {
+    return { ok: true, data: { inserted: 0, skipped: 0, rejected: 0 } };
+  }
+
+  const capped = elements.slice(0, DISCOVERED_COURT_ID_CAP);
+
+  const { data, error } = await supabase.functions.invoke('upsert-discovered-courts', {
+    body: { elements: capped },
+  });
+
+  if (error) {
+    return { ok: false, error: friendlyCourtsError(error.message) };
+  }
+
+  const payload = data as
+    | (UpsertDiscoveredCourtsData & { ok?: boolean; error?: string })
+    | null;
+
+  if (!payload || typeof payload !== 'object') {
+    return { ok: false, error: 'Unexpected response from court discovery.' };
+  }
+
+  if (payload.ok === false) {
+    return {
+      ok: false,
+      error: friendlyCourtsError(
+        typeof payload.error === 'string' ? payload.error : 'Court discovery failed.'
+      ),
+    };
+  }
+
+  return {
+    ok: true,
+    data: {
+      inserted: Number(payload.inserted) || 0,
+      skipped: Number(payload.skipped) || 0,
+      rejected: Number(payload.rejected) || 0,
+      refreshed:
+        typeof payload.refreshed === 'number' ? payload.refreshed : undefined,
+      remaining:
+        typeof payload.remaining === 'number' ? payload.remaining : undefined,
+    },
+  };
 }
