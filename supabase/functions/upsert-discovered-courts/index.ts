@@ -15,8 +15,9 @@ import {
   OVERPASS_TIMEOUT_MS,
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_SECONDS,
+  OVERPASS_UNAVAILABLE_ERROR,
   buildOverpassIdsQuery,
-  courtRowFromOverpassElement,
+  classifyIngestElements,
   decideUserAuth,
   enforceIdCap,
   interpretRateLimitResult,
@@ -24,8 +25,12 @@ import {
   parseExistingCourtsLookup,
   parseOsmIdentities,
   partitionIdentitiesForFetch,
+  publicOverpassAttempt,
   sourceIdKey,
+  retryIdentities,
+  runOverpassMirrorSequence,
   type CourtUpsertRow,
+  type MirrorProbe,
   type OsmIdentity,
   type OverpassElement,
 } from './ingestLogic.ts';
@@ -212,47 +217,50 @@ Deno.serve(async (request) => {
       );
     }
 
-    const overpass = await fetchOverpassElements(toFetch);
-    if (!overpass.ok) {
-      // Soft failure: do not crash; nothing inserted.
-      return json({
-        ok: true,
-        inserted: 0,
-        skipped,
-        rejected: rejected + toFetch.length,
-        refreshed: 0,
-        overpass_error: overpass.error,
-        remaining: userRate.remaining,
-        global_remaining: globalRate.global_remaining ?? 0,
-      });
+    const query = buildOverpassIdsQuery(toFetch);
+    const overpass = await runOverpassMirrorSequence(OVERPASS_ENDPOINTS, (endpoint) =>
+      probeOverpass(endpoint, query)
+    );
+    const overpassAttempts = overpass.attempts.map(publicOverpassAttempt);
+    console.log(
+      JSON.stringify({
+        event: 'overpass_refetch',
+        outcome: overpass.outcome,
+        reason: overpass.reason,
+        attempts: overpassAttempts,
+      })
+    );
+
+    if (overpass.outcome === 'unavailable') {
+      // Temporary miss. Do not count these IDs as rejected; the client retries them.
+      return json(
+        {
+          ok: false,
+          error: OVERPASS_UNAVAILABLE_ERROR,
+          inserted: 0,
+          skipped,
+          rejected,
+          refreshed: 0,
+          retry_ids: retryIdentities(toFetch),
+          overpass_error: overpass.reason,
+          overpass_attempts: overpassAttempts,
+          remaining: userRate.remaining,
+          global_remaining: globalRate.global_remaining ?? 0,
+        },
+        503
+      );
     }
 
     const nowIso = new Date().toISOString();
+    const classified = classifyIngestElements(toFetch, overpass.elements ?? [], nowIso);
+    rejected += classified.rejected;
     const rows: CourtUpsertRow[] = [];
-    const seenFetched = new Set<string>();
-    for (const identity of toFetch) {
-      const key = sourceIdKey(identity.type, identity.id);
-      // Belt-and-suspenders: never upsert a previously rejected court.
-      const existing = existingLookup.bySourceId.get(key);
+    for (const row of classified.rows) {
+      const existing = existingLookup.bySourceId.get(row.source_id);
       if (existing?.verification_status === 'rejected') {
         skipped += 1;
         continue;
       }
-      const el = overpass.byKey.get(key);
-      if (!el) {
-        rejected += 1;
-        continue;
-      }
-      const row = courtRowFromOverpassElement(el, nowIso);
-      if (!row) {
-        rejected += 1;
-        continue;
-      }
-      if (seenFetched.has(row.source_id)) {
-        skipped += 1;
-        continue;
-      }
-      seenFetched.add(row.source_id);
       if (existing?.verification_status === 'verified') {
         refreshed += 1;
       }
@@ -288,6 +296,8 @@ Deno.serve(async (request) => {
       skipped,
       rejected,
       refreshed,
+      retry_ids: [],
+      overpass_attempts: overpassAttempts,
       remaining: userRate.remaining,
       global_remaining: globalRate.global_remaining ?? 0,
     });
@@ -309,63 +319,44 @@ async function loadExistingCourts(
   return parseExistingCourtsLookup(data, error);
 }
 
-async function fetchOverpassElements(identities: OsmIdentity[]): Promise<
-  | { ok: true; byKey: Map<string, OverpassElement> }
-  | { ok: false; error: 'timeout' | 'network' | 'invalid_json' | 'http_error' | 'empty' }
-> {
-  const query = buildOverpassIdsQuery(identities);
-  let lastError: 'timeout' | 'network' | 'invalid_json' | 'http_error' | 'empty' = 'network';
-
-  for (const endpoint of OVERPASS_ENDPOINTS) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), OVERPASS_TIMEOUT_MS);
-    try {
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-          Accept: 'application/json',
-          'User-Agent': 'BallOutBasketball/1.0 (upsert-discovered-courts)',
-        },
-        body: `data=${encodeURIComponent(query)}`,
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        lastError = 'http_error';
-        continue;
-      }
-      let payload: { elements?: OverpassElement[] };
-      try {
-        payload = (await response.json()) as { elements?: OverpassElement[] };
-      } catch {
-        lastError = 'invalid_json';
-        continue;
-      }
-      const elements = Array.isArray(payload.elements) ? payload.elements : [];
-      if (elements.length === 0) {
-        lastError = 'empty';
-        // Empty can be legitimate (ids gone); treat as ok with empty map.
-        return { ok: true, byKey: new Map() };
-      }
-      const byKey = new Map<string, OverpassElement>();
-      for (const el of elements) {
-        if ((el.type === 'node' || el.type === 'way') && typeof el.id === 'number') {
-          byKey.set(sourceIdKey(el.type, el.id), el);
-        }
-      }
-      return { ok: true, byKey };
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        lastError = 'timeout';
-      } else {
-        lastError = 'network';
-      }
-    } finally {
-      clearTimeout(timer);
+async function probeOverpass(endpoint: string, query: string): Promise<MirrorProbe> {
+  const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), OVERPASS_TIMEOUT_MS);
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        Accept: 'application/json',
+        'User-Agent': 'BallOutBasketball/1.0 (upsert-discovered-courts)',
+      },
+      body: `data=${encodeURIComponent(query)}`,
+      signal: controller.signal,
+    });
+    const duration_ms = Date.now() - started;
+    if (!response.ok) {
+      return { ok: false, status: response.status, duration_ms, error: 'http_error' };
     }
+    try {
+      const payload = (await response.json()) as { elements?: OverpassElement[] };
+      const elements = Array.isArray(payload.elements) ? payload.elements : [];
+      return { ok: true, status: response.status, duration_ms, elements };
+    } catch {
+      return { ok: false, status: response.status, duration_ms, error: 'invalid_json' };
+    }
+  } catch (err) {
+    const duration_ms = Date.now() - started;
+    const aborted = err instanceof Error && err.name === 'AbortError';
+    return {
+      ok: false,
+      status: null,
+      duration_ms,
+      error: aborted ? 'timeout' : 'network',
+    };
+  } finally {
+    clearTimeout(timer);
   }
-
-  return { ok: false, error: lastError };
 }
 
 function json(body: Record<string, unknown>, status = 200): Response {

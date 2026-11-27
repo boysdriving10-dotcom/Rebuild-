@@ -12,6 +12,7 @@ import {
   withCourtLoadDiag,
   type BBox,
 } from '@/data/overpassCourts';
+import { onIngestBatchResult } from '@/services/courtIngestContract';
 import {
   DISCOVERED_COURT_ID_CAP,
   canIngestDiscoveredCourts,
@@ -329,10 +330,13 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
             for (const batch of chunkIdentities(elements, DISCOVERED_COURT_ID_CAP)) {
               if (controller.signal.aborted || searchId !== searchIdRef.current) break;
               const ingest = await upsertDiscoveredCourtIds(batch);
-              if (!ingest.ok) {
-                ingestCooldownUntilRef.current = Date.now() + 30_000;
+              const step = onIngestBatchResult(Date.now(), ingest.ok);
+              if (!step.continueLoop) {
+                ingestCooldownUntilRef.current = step.cooldownUntil ?? Date.now();
                 if (__DEV__) {
-                  console.log('[courts] ingest skipped or failed', { error: ingest.error });
+                  console.log('[courts] ingest skipped or failed', {
+                    error: ingest.ok ? null : ingest.error,
+                  });
                 }
                 break;
               }
