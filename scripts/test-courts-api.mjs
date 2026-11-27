@@ -448,6 +448,41 @@ test('osmIdentitiesForIngest caps at 40 ids for the Edge Function', () => {
   assert.equal(identities[39].id, 40);
 });
 
+function listOsmIdentitiesForIngest(discoveredCourtIds, alreadyKnownIds) {
+  const known = new Set(alreadyKnownIds ?? []);
+  const seen = new Set();
+  const out = [];
+  for (const courtId of discoveredCourtIds) {
+    if (known.has(courtId)) continue;
+    const parsed = parseOsmCourtId(courtId);
+    if (!parsed) continue;
+    const key = `${parsed.type}/${parsed.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(parsed);
+  }
+  return out;
+}
+
+function chunkIdentities(items, size = DISCOVERED_COURT_ID_CAP) {
+  const batches = [];
+  for (let i = 0; i < items.length; i += size) batches.push(items.slice(i, i + size));
+  return batches;
+}
+
+test('dense viewport is ingested in 40-id batches instead of dropping the rest', () => {
+  const ids = Array.from({ length: 90 }, (_, i) => `osm-way-${i + 1}`);
+  const all = listOsmIdentitiesForIngest(ids, ['osm-way-1']);
+  assert.equal(all.length, 89);
+  const batches = chunkIdentities(all);
+  assert.equal(batches.length, 3);
+  assert.equal(batches[0].length, 40);
+  assert.equal(batches[1].length, 40);
+  assert.equal(batches[2].length, 9);
+  assert.equal(batches[0][0].id, 2);
+  assert.equal(batches[2][8].id, 90);
+});
+
 test('guest browse path never needs ingest when discovery ids are empty or known', () => {
   assert.deepEqual(osmIdentitiesForIngest([], ['osm-node-1']), []);
   assert.deepEqual(

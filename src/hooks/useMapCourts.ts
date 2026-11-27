@@ -6,15 +6,18 @@ import {
   dedupeCourts,
   fetchCourtsInRegion,
   getBoundsCacheKey,
+  getCachedCourts,
   isRegionTooZoomedOut,
   regionToBBox,
   withCourtLoadDiag,
   type BBox,
 } from '@/data/overpassCourts';
 import {
+  DISCOVERED_COURT_ID_CAP,
   canIngestDiscoveredCourts,
+  chunkIdentities,
   fetchCourtsInBounds,
-  osmIdentitiesForIngest,
+  listOsmIdentitiesForIngest,
   upsertDiscoveredCourtIds,
 } from '@/services/courtsApi';
 import type { Court } from '@/types';
@@ -41,8 +44,9 @@ type VerifiedCacheEntry = {
 const verifiedCourtsCache = new Map<string, VerifiedCacheEntry>();
 
 /**
- * Non-empty verified cache may short-circuit the DB fetch.
- * Empty `[]` must NOT short-circuit — signed-in users still need Overpass discovery.
+ * Non-empty verified cache may paint the map immediately.
+ * Empty `[]` must NOT count as a hit — signed-in users still need Overpass discovery.
+ * A hit does not by itself skip discovery; see shouldSkipDiscoveryOnVerifiedCache.
  * Exported for regression tests (keep in sync with runSearch).
  */
 export function shouldUseVerifiedCourtsCacheHit(cached: Court[] | null): boolean {
@@ -63,6 +67,23 @@ export function shouldPersistVerifiedCourtsCache(courts: Court[]): boolean {
  */
 export function shouldAttemptCourtDiscovery(mayIngest: boolean): boolean {
   return mayIngest === true;
+}
+
+/**
+ * Skip another Overpass round only when this viewport is already fully ingested.
+ * A non-empty verified cache by itself is not enough — that was the handful of
+ * rows already in the DB, while the rest of the city was still undiscovered.
+ */
+export function shouldSkipDiscoveryOnVerifiedCache(options: {
+  force: boolean;
+  verifiedCacheHit: boolean;
+  overpassCached: boolean;
+  pendingIngestCount: number;
+}): boolean {
+  if (options.force) return false;
+  if (!options.verifiedCacheHit) return false;
+  if (!options.overpassCached) return false;
+  return options.pendingIngestCount === 0;
 }
 
 function getCachedVerifiedCourts(region: Region): Court[] | null {
@@ -129,6 +150,8 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
   const abortRef = useRef<AbortController | null>(null);
   /** Monotonic id so only the latest in-flight search may update success/error UI. */
   const searchIdRef = useRef(0);
+  /** After an ingest failure (rate limit, Overpass re-fetch), don't hammer the next pans. */
+  const ingestCooldownUntilRef = useRef(0);
 
   const applyVerifiedToMap = useCallback(
     (region: Region, verified: Court[], showDiag: boolean, emptyDiag?: string | null) => {
@@ -170,14 +193,36 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
     }
 
     // Retry (`force`) must hit the network — do not short-circuit on memory cache.
-    // Non-empty verified cache only — empty must not block signed-in discovery/ingest.
-    const cached = !opts?.force ? getCachedVerifiedCourts(region) : null;
-    if (shouldUseVerifiedCourtsCacheHit(cached)) {
-      const bbox = regionToBBox(region);
-      const next = mergeCourtsWithFallback([], cached as Court[], bbox);
+    // Paint a verified-cache hit immediately, but keep discovering unless that
+    // cache already covers every Overpass court in this viewport.
+    const force = !!opts?.force;
+    const cached = !force ? getCachedVerifiedCourts(region) : null;
+    const verifiedHit = shouldUseVerifiedCourtsCacheHit(cached);
+    const bboxNow = regionToBBox(region);
+    const overpassCached = !force ? getCachedCourts(region) : null;
+    const pendingIngestCount =
+      verifiedHit && overpassCached
+        ? listOsmIdentitiesForIngest(
+            courtsInBBox(overpassCached, bboxNow).map((court) => court.id),
+            (cached as Court[]).map((court) => court.id)
+          ).length
+        : 0;
+
+    if (verifiedHit) {
+      const next = mergeCourtsWithFallback([], cached as Court[], bboxNow);
       courtsRef.current = next;
       setCourts(next);
       setError(null);
+    }
+
+    if (
+      shouldSkipDiscoveryOnVerifiedCache({
+        force,
+        verifiedCacheHit: verifiedHit,
+        overpassCached: overpassCached != null,
+        pendingIngestCount,
+      })
+    ) {
       return;
     }
 
@@ -274,20 +319,25 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
           searchId === searchIdRef.current
         ) {
           const knownIds = verified.map((c) => c.id);
-          const elements = osmIdentitiesForIngest(
-            discovery.courts.map((c) => c.id),
+          const elements = listOsmIdentitiesForIngest(
+            courtsInBBox(discovery.courts, bbox).map((c) => c.id),
             knownIds
           );
+          const ingestCoolingDown = Date.now() < ingestCooldownUntilRef.current;
 
-          if (elements.length > 0) {
-            const ingest = await upsertDiscoveredCourtIds(elements);
+          if (elements.length > 0 && !ingestCoolingDown) {
+            for (const batch of chunkIdentities(elements, DISCOVERED_COURT_ID_CAP)) {
+              if (controller.signal.aborted || searchId !== searchIdRef.current) break;
+              const ingest = await upsertDiscoveredCourtIds(batch);
+              if (!ingest.ok) {
+                ingestCooldownUntilRef.current = Date.now() + 30_000;
+                if (__DEV__) {
+                  console.log('[courts] ingest skipped or failed', { error: ingest.error });
+                }
+                break;
+              }
 
-            if (
-              ingest.ok &&
-              !controller.signal.aborted &&
-              searchId === searchIdRef.current
-            ) {
-              // 5) After ingestion, fetch verified courts again and update the map.
+              // Show each batch as it lands so a dense city is not stuck at the first 40.
               const refreshed = await fetchCourtsInBounds(bbox);
               if (
                 refreshed.ok &&
@@ -297,8 +347,6 @@ export function useMapCourts(_initialRegion: Region): MapCourtsState {
                 setCachedVerifiedCourts(region, refreshed.data);
                 applyVerifiedToMap(region, refreshed.data, false, null);
               }
-            } else if (__DEV__ && !ingest.ok) {
-              console.log('[courts] ingest skipped or failed', { error: ingest.error });
             }
           }
         } else if (__DEV__ && !discovery.ok && discovery.error !== 'Request cancelled.') {

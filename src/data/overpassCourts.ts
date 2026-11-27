@@ -2,16 +2,27 @@ import type { Region } from 'react-native-maps';
 
 import type { Court } from '@/types';
 
+/**
+ * Independent Overpass mirrors, fastest measured first.
+ * overpass-api.de and lz4.overpass-api.de are the same cluster; bbox queries
+ * there often take 25–40s, which the old 15s client abort discarded.
+ * openstreetmap.fr answered the same city queries in about 1–3s.
+ */
 const OVERPASS_ENDPOINTS = [
+  'https://overpass.openstreetmap.fr/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
   'https://overpass-api.de/api/interpreter',
   'https://lz4.overpass-api.de/api/interpreter',
 ] as const;
 
-/** Client abort — Overpass query also sets [timeout:25]. */
-const REQUEST_TIMEOUT_MS = 15_000;
-/** Extra attempts after the first (total attempts = 1 + MAX_RETRIES). */
-const MAX_RETRIES = 2;
-const RETRY_BASE_DELAY_MS = 800;
+/** Client abort. Matches the Overpass `[timeout:20]` so a slow mirror can finish. */
+const REQUEST_TIMEOUT_MS = 20_000;
+/** One attempt per configured mirror (total attempts = 1 + MAX_RETRIES). */
+const MAX_RETRIES = OVERPASS_ENDPOINTS.length - 1;
+/** Pause before switching mirrors. Flat — these are different servers, not a busy retry. */
+const RETRY_BASE_DELAY_MS = 300;
 /** After a failed Overpass sequence, skip network calls for this long (pans still get fallback). */
 const OVERPASS_COOLDOWN_MS = 45_000;
 const OVERPASS_BUSY_ERROR =
@@ -39,6 +50,8 @@ type OverpassResponse = {
 type CacheEntry = {
   courts: Court[];
   savedAt: number;
+  /** Exact bounds that were queried. The cache key is rounded and can collide. */
+  bbox: BBox;
 };
 
 const courtsCache = new Map<string, CacheEntry>();
@@ -71,20 +84,35 @@ export function getBoundsCacheKey(bbox: BBox): string {
   return `${bbox.south.toFixed(2)},${bbox.west.toFixed(2)},${bbox.north.toFixed(2)},${bbox.east.toFixed(2)}`;
 }
 
+/** True when every point of `inner` lies inside `outer` (edges included). */
+export function bboxCovers(outer: BBox, inner: BBox): boolean {
+  return (
+    outer.south <= inner.south &&
+    outer.north >= inner.north &&
+    outer.west <= inner.west &&
+    outer.east >= inner.east
+  );
+}
+
 export function getCachedCourts(region: Region): Court[] | null {
-  const key = getBoundsCacheKey(regionToBBox(region));
+  const bbox = regionToBBox(region);
+  const key = getBoundsCacheKey(bbox);
   const entry = courtsCache.get(key);
   if (!entry) return null;
   if (Date.now() - entry.savedAt > CACHE_TTL_MS) {
     courtsCache.delete(key);
     return null;
   }
+  // Same rounded key can be a smaller viewport. Don't reuse a result that
+  // never searched the area the user is looking at now.
+  if (!bboxCovers(entry.bbox, bbox)) return null;
   return entry.courts;
 }
 
 function setCachedCourts(region: Region, courts: Court[]) {
-  const key = getBoundsCacheKey(regionToBBox(region));
-  courtsCache.set(key, { courts, savedAt: Date.now() });
+  const bbox = regionToBBox(region);
+  const key = getBoundsCacheKey(bbox);
+  courtsCache.set(key, { courts, savedAt: Date.now(), bbox });
 }
 
 /** Names that are too generic to prefer over place/street context. */
@@ -287,16 +315,25 @@ export function dedupeCourts(courts: Court[]): Court[] {
   return out;
 }
 
-/** Prototype Overpass coverage — one request, uncapped out center. */
+/**
+ * One Overpass request for node/way courts.
+ * Exact `sport=basketball` misses `basketball;tennis` and `basketball=yes`
+ * on multi-sport pitches. Relations are omitted — ingest only accepts node/way.
+ */
 function buildOverpassQuery(bbox: BBox): string {
   const { south, west, north, east } = bbox;
   const box = `${south},${west},${north},${east}`;
   return `
-[out:json][timeout:25];
+[out:json][timeout:20];
 (
-  node["leisure"="pitch"]["sport"="basketball"](${box});
-  way["leisure"="pitch"]["sport"="basketball"](${box});
-  node["sport"="basketball"](${box});
+  node["leisure"="pitch"]["sport"~"basketball",i](${box});
+  way["leisure"="pitch"]["sport"~"basketball",i](${box});
+  node["leisure"="pitch"]["basketball"="yes"](${box});
+  way["leisure"="pitch"]["basketball"="yes"](${box});
+  node["sport"~"basketball",i](${box});
+  way["sport"~"basketball",i](${box});
+  node["amenity"="basketball_court"](${box});
+  way["amenity"="basketball_court"](${box});
 );
 out center;
 `.trim();
@@ -318,16 +355,23 @@ function isAbortError(err: unknown): boolean {
 }
 
 /** Short host label for diagnostics — never the full URL. */
-export function overpassHostLabel(endpoint: string): 'overpass' | 'lz4' {
-  return endpoint.includes('lz4.') ? 'lz4' : 'overpass';
+export type OverpassHostLabel = 'fr' | 'mailru' | 'private' | 'kumi' | 'overpass' | 'lz4';
+
+export function overpassHostLabel(endpoint: string): OverpassHostLabel {
+  if (endpoint.includes('openstreetmap.fr')) return 'fr';
+  if (endpoint.includes('mail.ru')) return 'mailru';
+  if (endpoint.includes('private.coffee')) return 'private';
+  if (endpoint.includes('kumi.systems')) return 'kumi';
+  if (endpoint.includes('lz4.')) return 'lz4';
+  return 'overpass';
 }
 
 /**
  * Safe production diagnostic token (no coords, URLs, bodies, or secrets).
- * Examples: `HTTP 406@lz4`, `timeout@overpass`, `empty@overpass`.
+ * Examples: `HTTP 406@lz4`, `timeout@overpass`, `empty@fr`.
  */
 export function formatCourtLoadDiag(parts: {
-  host: 'overpass' | 'lz4';
+  host: OverpassHostLabel;
   category: 'http' | 'timeout' | 'network' | 'invalid_json' | 'empty';
   status?: number;
 }): string {
@@ -376,6 +420,8 @@ async function fetchOnce(
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        Accept: 'application/json',
+        'User-Agent': 'BallOutBasketball/1.0 (com.runit.basketball)',
       },
       body: `data=${encodeURIComponent(query)}`,
       signal: controller.signal,
@@ -469,9 +515,10 @@ export function shouldContinueAfterFailure(options: {
 
 /**
  * Fetch courts for the visible region.
- * Uses in-memory bbox cache, client timeout, and retries with backoff on
- * timeouts / 429 / 5xx (rotates Overpass endpoints). Non-retryable HTTP errors
- * (e.g. 406) still rotate once through each configured endpoint before stopping.
+ * Uses an in-memory bbox cache that only hits when the cached query covers
+ * the requested bounds. Each configured mirror is tried once (independent
+ * hosts, not only the overpass-api.de cluster). Non-retryable HTTP errors
+ * (e.g. 406) still advance to the next mirror. Cancel stops immediately.
  * After a failed sequence, a short cooldown skips network calls so map pans
  * do not hammer an overloaded Overpass; pass `force: true` to bypass once (Retry).
  * Empty Overpass successes are returned but not cached, so fallback can still apply.
@@ -525,8 +572,7 @@ export async function fetchCourtsInRegion(
     }
 
     if (attempt > 0) {
-      const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
-      await sleep(delay);
+      await sleep(RETRY_BASE_DELAY_MS);
       if (options?.signal?.aborted) {
         return { ok: false, error: 'Request cancelled.' };
       }

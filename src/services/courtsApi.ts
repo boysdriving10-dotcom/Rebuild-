@@ -200,10 +200,11 @@ export function parseOsmCourtId(courtId: string): OsmCourtIdentity | null {
 export const DISCOVERED_COURT_ID_CAP = 40;
 
 /**
- * Extract unique OSM node/way identities from Overpass discovery Court ids.
+ * Every new OSM node/way identity in discovery order.
  * Skips ids already present in `alreadyKnownIds` (typically verified DB pins).
+ * Does not cap — callers chunk with `chunkIdentities` before the Edge Function.
  */
-export function osmIdentitiesForIngest(
+export function listOsmIdentitiesForIngest(
   discoveredCourtIds: string[],
   alreadyKnownIds?: Iterable<string>
 ): OsmCourtIdentity[] {
@@ -219,10 +220,33 @@ export function osmIdentitiesForIngest(
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(parsed);
-    if (out.length >= DISCOVERED_COURT_ID_CAP) break;
   }
 
   return out;
+}
+
+/**
+ * First page of `listOsmIdentitiesForIngest`, capped for one Edge Function call.
+ * Prefer `listOsmIdentitiesForIngest` + `chunkIdentities` when a viewport has more.
+ */
+export function osmIdentitiesForIngest(
+  discoveredCourtIds: string[],
+  alreadyKnownIds?: Iterable<string>
+): OsmCourtIdentity[] {
+  return listOsmIdentitiesForIngest(discoveredCourtIds, alreadyKnownIds).slice(
+    0,
+    DISCOVERED_COURT_ID_CAP
+  );
+}
+
+/** Split identities into Edge Function batches. The server rejects more than the cap. */
+export function chunkIdentities<T>(items: T[], size: number = DISCOVERED_COURT_ID_CAP): T[][] {
+  if (size < 1) return items.length > 0 ? [items] : [];
+  const batches: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    batches.push(items.slice(i, i + size));
+  }
+  return batches;
 }
 
 /**

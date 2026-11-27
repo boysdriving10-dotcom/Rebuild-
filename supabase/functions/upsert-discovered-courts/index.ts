@@ -30,7 +30,13 @@ import {
   type OverpassElement,
 } from './ingestLogic.ts';
 
+// Same independent mirrors as the client. overpass-api.de alone often exceeds
+// OVERPASS_TIMEOUT_MS, which dropped the re-fetch after discovery succeeded.
 const OVERPASS_ENDPOINTS = [
+  'https://overpass.openstreetmap.fr/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
   'https://overpass-api.de/api/interpreter',
   'https://lz4.overpass-api.de/api/interpreter',
 ] as const;
@@ -318,6 +324,8 @@ async function fetchOverpassElements(identities: OsmIdentity[]): Promise<
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+          Accept: 'application/json',
+          'User-Agent': 'BallOutBasketball/1.0 (upsert-discovered-courts)',
         },
         body: `data=${encodeURIComponent(query)}`,
         signal: controller.signal,

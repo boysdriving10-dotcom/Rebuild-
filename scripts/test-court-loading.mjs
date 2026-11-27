@@ -244,7 +244,7 @@ test('empty cached verified result does not short-circuit discovery for signed-i
   assert.equal(wouldSkipSearch, false);
 });
 
-test('non-empty verified cache still short-circuits DB fetch and is persisted', () => {
+test('non-empty verified cache is a valid paint source and is persisted', () => {
   const cached = [
     {
       id: 'osm-node-1',
@@ -382,7 +382,28 @@ function withCourtLoadDiag(message, diag) {
 }
 
 function overpassHostLabel(endpoint) {
-  return endpoint.includes('lz4.') ? 'lz4' : 'overpass';
+  if (endpoint.includes('openstreetmap.fr')) return 'fr';
+  if (endpoint.includes('mail.ru')) return 'mailru';
+  if (endpoint.includes('private.coffee')) return 'private';
+  if (endpoint.includes('kumi.systems')) return 'kumi';
+  if (endpoint.includes('lz4.')) return 'lz4';
+  return 'overpass';
+}
+
+function bboxCovers(outer, inner) {
+  return (
+    outer.south <= inner.south &&
+    outer.north >= inner.north &&
+    outer.west <= inner.west &&
+    outer.east >= inner.east
+  );
+}
+
+function shouldSkipDiscoveryOnVerifiedCache(options) {
+  if (options.force) return false;
+  if (!options.verifiedCacheHit) return false;
+  if (!options.overpassCached) return false;
+  return options.pendingIngestCount === 0;
 }
 
 test('diag tags cover http/timeout/network/invalid_json/empty without secrets', () => {
@@ -478,6 +499,93 @@ test('meaningful region: ignores Brooklyn initial / tiny jitter', () => {
     }),
     false
   );
+});
+
+test('rounded cache key does not reuse a smaller bbox', () => {
+  const smaller = { south: 40.7, west: -74.01, north: 40.74, east: -73.97 };
+  const larger = { south: 40.695, west: -74.014, north: 40.745, east: -73.966 };
+  assert.equal(bboxCovers(larger, smaller), true);
+  assert.equal(bboxCovers(smaller, larger), false);
+  assert.equal(bboxCovers(smaller, smaller), true);
+});
+
+test('verified cache skips discovery only when Overpass ids are already ingested', () => {
+  assert.equal(
+    shouldSkipDiscoveryOnVerifiedCache({
+      force: false,
+      verifiedCacheHit: true,
+      overpassCached: true,
+      pendingIngestCount: 0,
+    }),
+    true
+  );
+  assert.equal(
+    shouldSkipDiscoveryOnVerifiedCache({
+      force: false,
+      verifiedCacheHit: true,
+      overpassCached: false,
+      pendingIngestCount: 0,
+    }),
+    false
+  );
+  assert.equal(
+    shouldSkipDiscoveryOnVerifiedCache({
+      force: false,
+      verifiedCacheHit: true,
+      overpassCached: true,
+      pendingIngestCount: 120,
+    }),
+    false
+  );
+  assert.equal(
+    shouldSkipDiscoveryOnVerifiedCache({
+      force: true,
+      verifiedCacheHit: true,
+      overpassCached: true,
+      pendingIngestCount: 0,
+    }),
+    false
+  );
+});
+
+test('host failover continues to a third mirror after two failures', () => {
+  const endpoints = ['fr', 'mailru', 'kumi'];
+  const responses = {
+    fr: { ok: false, retryable: true },
+    mailru: { ok: false, retryable: false },
+    kumi: { ok: true, courts: [{ id: 'osm-1' }] },
+  };
+  const attempts = [];
+  let result = null;
+  for (let attempt = 0; attempt <= endpoints.length - 1; attempt++) {
+    const host = endpoints[attempt];
+    attempts.push(host);
+    const r = responses[host];
+    if (r.ok) {
+      result = r;
+      break;
+    }
+    if (
+      !shouldContinueAfterFailure({
+        retryable: r.retryable,
+        cancelled: false,
+        attemptIndex: attempt,
+        endpointCount: endpoints.length,
+      })
+    ) {
+      break;
+    }
+  }
+  assert.deepEqual(attempts, ['fr', 'mailru', 'kumi']);
+  assert.equal(result?.courts.length, 1);
+});
+
+test('mirror labels stay short and do not include the URL', () => {
+  assert.equal(overpassHostLabel('https://overpass.openstreetmap.fr/api/interpreter'), 'fr');
+  assert.equal(overpassHostLabel('https://maps.mail.ru/osm/tools/overpass/api/interpreter'), 'mailru');
+  assert.equal(overpassHostLabel('https://lz4.overpass-api.de/api/interpreter'), 'lz4');
+  assert.equal(overpassHostLabel('https://overpass-api.de/api/interpreter'), 'overpass');
+  assert.equal(formatCourtLoadDiag({ host: 'fr', category: 'timeout' }), 'timeout@fr');
 });
 
 test('meaningful region: pan or zoom unlocks search', () => {
