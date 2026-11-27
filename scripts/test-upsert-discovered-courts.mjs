@@ -12,6 +12,7 @@ import {
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_SECONDS,
   applyRateLimitWindow,
+  classifyIngestElements,
   coordsFromElement,
   courtRowFromOverpassElement,
   decideUserAuth,
@@ -22,6 +23,9 @@ import {
   parseExistingCourtsLookup,
   parseOsmIdentities,
   partitionIdentitiesForFetch,
+  publicOverpassAttempt,
+  retryIdentities,
+  runOverpassMirrorSequence,
   sourceIdKey,
 } from '../supabase/functions/upsert-discovered-courts/ingestLogic.ts';
 
@@ -86,6 +90,7 @@ test('basketball evidence requires credible court/pitch tagging', () => {
   assert.equal(hasBasketballEvidence({ sport: 'tennis' }), false);
   assert.equal(hasBasketballEvidence({ leisure: 'pitch' }), false);
   assert.equal(hasBasketballEvidence({ leisure: 'swimming_pool', sport: 'basketball' }), false);
+  assert.equal(hasBasketballEvidence({ leisure: 'playground', sport: 'basketball' }), false);
   assert.equal(hasBasketballEvidence({ sport: 'basketball', shop: 'sports' }), false);
   assert.equal(hasBasketballEvidence({ sport: 'basketball', amenity: 'cafe' }), false);
   assert.equal(hasBasketballEvidence({}), false);
@@ -382,4 +387,183 @@ test('app-facing osm ids remain type/id based for games', () => {
   assert.equal(row.source, 'overpass');
   assert.equal(row.source_id, 'node/123');
   assert.equal(`osm-${row.source_id.replace('/', '-')}`, 'osm-node-123');
+});
+
+const FR = 'https://overpass.openstreetmap.fr/api/interpreter';
+const DE = 'https://overpass-api.de/api/interpreter';
+
+test('first Overpass mirror fails and the second succeeds', async () => {
+  const sequence = await runOverpassMirrorSequence([DE, FR], async (endpoint) => {
+    if (endpoint === DE) {
+      return { ok: false, status: 502, duration_ms: 1200, error: 'http_error' };
+    }
+    return {
+      ok: true,
+      status: 200,
+      duration_ms: 400,
+      elements: [
+        {
+          type: 'way',
+          id: 667347315,
+          center: { lat: 39.678688, lon: -75.01237 },
+          tags: { leisure: 'pitch', sport: 'basketball' },
+        },
+      ],
+    };
+  });
+
+  assert.equal(sequence.outcome, 'elements');
+  assert.equal(sequence.attempts.length, 2);
+  assert.equal(sequence.attempts[0].host, 'overpass');
+  assert.equal(sequence.attempts[0].ok, false);
+  assert.equal(sequence.attempts[0].status, 502);
+  assert.equal(sequence.attempts[0].error, 'http_error');
+  assert.equal(sequence.attempts[0].duration_ms, 1200);
+  assert.equal(sequence.attempts[1].host, 'fr');
+  assert.equal(sequence.attempts[1].ok, true);
+  assert.equal(sequence.attempts[1].status, 200);
+  assert.equal(sequence.attempts[1].duration_ms, 400);
+  assert.equal(sequence.elements?.length, 1);
+});
+
+test('all Overpass mirrors failing is a temporary miss, not a rejection', async () => {
+  const identities = [
+    { type: 'way', id: 544284471 },
+    { type: 'way', id: 667347315 },
+    { type: 'way', id: 741672531 },
+  ];
+  const sequence = await runOverpassMirrorSequence([FR, DE], async () => ({
+    ok: false,
+    status: 504,
+    duration_ms: 15000,
+    error: 'http_error',
+  }));
+
+  assert.equal(sequence.outcome, 'unavailable');
+  assert.equal(sequence.reason, 'http_error');
+  assert.equal(sequence.elements, null);
+  assert.equal(sequence.attempts.every((attempt) => attempt.ok === false), true);
+  const retry = retryIdentities(identities);
+  assert.deepEqual(retry, identities);
+  assert.equal(retry.length, 3);
+});
+
+test('a batch keeps valid courts and rejects invalid ones', () => {
+  const classified = classifyIngestElements(
+    [
+      { type: 'way', id: 1 },
+      { type: 'way', id: 2 },
+      { type: 'way', id: 364761941 },
+    ],
+    [
+      {
+        type: 'way',
+        id: 1,
+        center: { lat: 39.7, lon: -75 },
+        tags: { leisure: 'pitch', sport: 'basketball', name: 'Owens' },
+      },
+      {
+        type: 'way',
+        id: 364761941,
+        center: { lat: 39.95, lon: -75.16 },
+        tags: { leisure: 'playground', sport: 'basketball' },
+      },
+    ],
+    '2026-11-27T06:35:00.000Z'
+  );
+
+  assert.equal(classified.rows.length, 1);
+  assert.equal(classified.rows[0].source_id, 'way/1');
+  assert.equal(classified.rows[0].verification_status, 'verified');
+  assert.equal(classified.rejected, 2);
+});
+
+test('retry after a failed batch skips courts already inserted', () => {
+  const now = Date.parse('2026-11-27T06:40:00.000Z');
+  const discovered = [
+    { type: 'way', id: 1 },
+    { type: 'way', id: 2 },
+    { type: 'way', id: 3 },
+  ];
+  const existing = new Map([
+    [
+      'way/1',
+      {
+        source_id: 'way/1',
+        updatedAtMs: now,
+        verification_status: 'verified',
+      },
+    ],
+  ]);
+  const again = partitionIdentitiesForFetch(discovered, existing, now, COURT_REFRESH_AFTER_MS);
+  assert.equal(again.skippedFresh, 1);
+  assert.deepEqual(
+    again.toFetch.map((identity) => sourceIdKey(identity.type, identity.id)),
+    ['way/2', 'way/3']
+  );
+  const row = courtRowFromOverpassElement(
+    {
+      type: 'way',
+      id: 1,
+      center: { lat: 39.7, lon: -75 },
+      tags: { leisure: 'pitch', sport: 'basketball' },
+    },
+    '2026-11-27T06:40:00.000Z'
+  );
+  assert.equal(row?.source, 'overpass');
+  assert.equal(row?.source_id, 'way/1');
+});
+
+test('invalid identities stay rejected and are distinct from a temporary fetch failure', async () => {
+  const parsed = parseOsmIdentities([
+    { type: 'relation', id: 9 },
+    { type: 'way', id: 2 },
+    null,
+  ]);
+  assert.equal(parsed.rejected, 2);
+  assert.deepEqual(parsed.identities, [{ type: 'way', id: 2 }]);
+
+  const sequence = await runOverpassMirrorSequence([FR], async () => ({
+    ok: false,
+    status: null,
+    duration_ms: 20,
+    error: 'timeout',
+  }));
+  assert.equal(sequence.outcome, 'unavailable');
+  assert.deepEqual(retryIdentities(parsed.identities), [{ type: 'way', id: 2 }]);
+  assert.equal(parsed.rejected, 2);
+});
+
+test('every mirror returning an empty body is not found, not a transport failure', async () => {
+  const sequence = await runOverpassMirrorSequence([FR, DE], async () => ({
+    ok: true,
+    status: 200,
+    duration_ms: 80,
+    elements: [],
+  }));
+  assert.equal(sequence.outcome, 'not_found');
+  assert.equal(sequence.reason, 'empty');
+  assert.deepEqual(sequence.elements, []);
+  assert.equal(sequence.attempts[0].error, 'empty');
+  assert.equal(sequence.attempts[0].ok, false);
+});
+
+test('Overpass attempt logs keep status and timing and drop secrets', () => {
+  const safe = publicOverpassAttempt({
+    host: 'fr',
+    duration_ms: 12.4,
+    ok: false,
+    status: 502,
+    error: 'http_error',
+    authorization: 'Bearer secret-token',
+    user_id: 'person-1',
+  });
+  const encoded = JSON.stringify(safe);
+  assert.equal(encoded.includes('secret-token'), false);
+  assert.equal(encoded.includes('person-1'), false);
+  assert.equal(encoded.includes('Bearer'), false);
+  assert.deepEqual(Object.keys(safe).sort(), ['duration_ms', 'error', 'host', 'ok', 'status']);
+  assert.equal(safe.duration_ms, 12);
+  assert.equal(safe.host, 'fr');
+  assert.equal(safe.status, 502);
 });

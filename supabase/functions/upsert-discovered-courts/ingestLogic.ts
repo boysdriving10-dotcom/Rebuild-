@@ -525,3 +525,150 @@ export function partitionIdentitiesForFetch(
 
   return { toFetch, skippedFresh, skippedRejected, refreshCount };
 }
+
+/** Short mirror label for logs. Never a full URL. */
+export type OverpassMirrorHost = 'fr' | 'mailru' | 'private' | 'kumi' | 'overpass' | 'lz4' | 'other';
+
+export type OverpassAttemptError = 'timeout' | 'network' | 'invalid_json' | 'http_error' | 'empty';
+
+/** One mirror try. Safe to log and return: host label, status, timing, and outcome only. */
+export type OverpassAttempt = {
+  host: OverpassMirrorHost;
+  duration_ms: number;
+  ok: boolean;
+  status: number | null;
+  error?: OverpassAttemptError;
+};
+
+export const OVERPASS_UNAVAILABLE_ERROR = 'overpass_unavailable';
+
+export function overpassMirrorHost(endpoint: string): OverpassMirrorHost {
+  if (endpoint.includes('openstreetmap.fr')) return 'fr';
+  if (endpoint.includes('mail.ru')) return 'mailru';
+  if (endpoint.includes('private.coffee')) return 'private';
+  if (endpoint.includes('kumi.systems')) return 'kumi';
+  if (endpoint.includes('lz4.')) return 'lz4';
+  if (endpoint.includes('overpass-api.de')) return 'overpass';
+  return 'other';
+}
+
+/** Copy only the diagnostic fields so a log line cannot carry tokens or headers. */
+export function publicOverpassAttempt(attempt: OverpassAttempt): OverpassAttempt {
+  const safe: OverpassAttempt = {
+    host: attempt.host,
+    duration_ms: Math.max(0, Math.round(attempt.duration_ms)),
+    ok: attempt.ok === true,
+    status: typeof attempt.status === 'number' ? attempt.status : null,
+  };
+  if (!safe.ok && attempt.error) safe.error = attempt.error;
+  return safe;
+}
+
+export type MirrorProbe =
+  | { ok: true; status: number; duration_ms: number; elements: OverpassElement[] }
+  | { ok: false; status: number | null; duration_ms: number; error: OverpassAttemptError };
+
+export type MirrorSequenceResult = {
+  attempts: OverpassAttempt[];
+  elements: OverpassElement[] | null;
+  outcome: 'elements' | 'not_found' | 'unavailable';
+  reason: OverpassAttemptError | null;
+};
+
+function attemptFromProbe(endpoint: string, probe: MirrorProbe, error?: OverpassAttemptError): OverpassAttempt {
+  return publicOverpassAttempt({
+    host: overpassMirrorHost(endpoint),
+    duration_ms: probe.duration_ms,
+    ok: error ? false : probe.ok,
+    status: probe.status,
+    error,
+  });
+}
+
+/**
+ * Try each mirror until one returns elements.
+ * An empty HTTP 200 continues to the next mirror. Every mirror empty means the
+ * IDs were not found. Any transport failure without elements is temporary.
+ */
+export async function runOverpassMirrorSequence(
+  endpoints: readonly string[],
+  probe: (endpoint: string) => Promise<MirrorProbe>
+): Promise<MirrorSequenceResult> {
+  const attempts: OverpassAttempt[] = [];
+
+  for (const endpoint of endpoints) {
+    const result = await probe(endpoint);
+    if (result.ok && result.elements.length > 0) {
+      attempts.push(attemptFromProbe(endpoint, result));
+      return { attempts, elements: result.elements, outcome: 'elements', reason: null };
+    }
+    if (result.ok) {
+      attempts.push(attemptFromProbe(endpoint, result, 'empty'));
+      continue;
+    }
+    attempts.push(attemptFromProbe(endpoint, result, result.error));
+  }
+
+  if (attempts.length > 0 && attempts.every((attempt) => attempt.error === 'empty')) {
+    return { attempts, elements: [], outcome: 'not_found', reason: 'empty' };
+  }
+
+  let reason: OverpassAttemptError | null = null;
+  for (let i = attempts.length - 1; i >= 0; i -= 1) {
+    const error = attempts[i]?.error;
+    if (error && error !== 'empty') {
+      reason = error;
+      break;
+    }
+  }
+
+  return {
+    attempts,
+    elements: null,
+    outcome: 'unavailable',
+    reason: reason ?? 'network',
+  };
+}
+
+/** Identities the client should send again after a temporary Overpass failure. */
+export function retryIdentities(identities: OsmIdentity[]): { type: OsmElementType; id: number }[] {
+  return identities.map((identity) => ({ type: identity.type, id: identity.id }));
+}
+
+/**
+ * Split a successful Overpass answer into verified rows and permanent rejects.
+ * Missing elements and tags without basketball evidence are rejects, not retries.
+ */
+export function classifyIngestElements(
+  identities: OsmIdentity[],
+  elements: OverpassElement[],
+  nowIso: string
+): { rows: CourtUpsertRow[]; rejected: number } {
+  const byKey = new Map<string, OverpassElement>();
+  for (const el of elements) {
+    if ((el.type === 'node' || el.type === 'way') && typeof el.id === 'number') {
+      byKey.set(sourceIdKey(el.type, el.id), el);
+    }
+  }
+
+  const rows: CourtUpsertRow[] = [];
+  const seen = new Set<string>();
+  let rejected = 0;
+
+  for (const identity of identities) {
+    const el = byKey.get(sourceIdKey(identity.type, identity.id));
+    if (!el) {
+      rejected += 1;
+      continue;
+    }
+    const row = courtRowFromOverpassElement(el, nowIso);
+    if (!row || seen.has(row.source_id)) {
+      rejected += 1;
+      continue;
+    }
+    seen.add(row.source_id);
+    rows.push(row);
+  }
+
+  return { rows, rejected };
+}
